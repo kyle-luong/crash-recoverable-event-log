@@ -1,0 +1,25 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          c++ --version
+          clang-format --version || true
+      - name: Verify project
+        run: ./scripts/verify.sh
+      - name: Release build and suite
+        run: |
+          cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DEVENTLOG_SLOW_TESTS=ON
+          cmake --build build/release --parallel
+          ctest --test-dir build/release --output-on-failure

@@ -1,0 +1,22 @@
+# Build trees
+build/
+build-*/
+cmake-build-*/
+
+# Benchmark + test output (raw results are not committed; curated examples live in benchmarks/)
+out/
+*.json.tmp
+
+# Scratch roots used by recovery and crash tests
+tmp-crash-tests/
+scratch/
+data/
+*.log
+!docs/*.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json
+.cache/

@@ -33,7 +33,10 @@ add_library(eventlog_core STATIC
   src/error.cpp
   src/crc32c.cpp
   src/record.cpp
-  src/payload.cpp)
+  src/payload.cpp
+  src/file_ops.cpp
+  src/writer.cpp
+  src/reader.cpp)
 target_include_directories(eventlog_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(eventlog_core PUBLIC eventlog_flags)
 
@@ -42,7 +45,7 @@ target_link_libraries(eventlog PRIVATE eventlog_core)
 
 enable_testing()
 
-set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec)
+set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_reader)
 foreach(suite IN LISTS EVENTLOG_TEST_SUITES)
   add_executable(${suite} tests/${suite}.cpp)
   target_link_libraries(${suite} PRIVATE eventlog_core)

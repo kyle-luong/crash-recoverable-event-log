@@ -33,7 +33,7 @@ Before Claude Code implements a **substantial** task, validate the requirements,
 3. Create `CLAUDE.md` and `docs/STATUS.md` from the templates in the shared workflow.
 4. Ask Claude Code to implement **only task `C-00`, `GO-00`, or `CPP-00`** using the first-task prompt at the end of the relevant PRD.
 5. Establish and run `./scripts/verify.sh` before implementing product features.
-6. Work one bounded task at a time. Commit genuine milestones, use clean-context review for significant changes, manually merge after passing CI.
+6. Work one bounded task at a time. Commit genuine milestones directly to `main` after local verification passes (shared workflow §7); use clean-context review for significant changes.
 
 **The PRD is the plan, not a mandate to implement every future idea.** `MUST` acceptance criteria are for the scoped MVP; `LATER` sections are deliberately excluded unless you decide to expand the project.
 
@@ -53,7 +53,7 @@ Before Claude Code implements a **substantial** task, validate the requirements,
 - Make each project **narrow, useful, and technically distinctive**, not a large generic platform.
 - Standardize correctness, tests, formatters, warnings, sanitizer/race checks, basic CI, and a concise README.
 - Do not add mandatory Kubernetes, Terraform, a dashboard, extensive architecture diagrams, cloud deployment, or custom agent orchestrator.
-- Claude Code is the default executor; local tests are the verifier; optional Codex/fresh-context Claude reviews substantive changes; human retains merge control.
+- Claude Code is the default executor; local tests are the verifier; optional Codex/fresh-context Claude reviews substantive changes; human retains release and remote-push control.
 - Favor honest specifications of mechanisms and failure guarantees over impressive but unjustified claims.
 
 ## How to read the PRDs

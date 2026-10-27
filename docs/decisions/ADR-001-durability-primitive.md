@@ -1,6 +1,7 @@
 # ADR-001 — One `SyncData` boundary, mapped per platform
 
-**Status:** accepted (2026-09-08) · **Affects:** durability guarantee, benchmark comparability
+**Status:** accepted (2026-09-08), amended by [ADR-004](ADR-004-linux-is-the-supported-platform.md)
+(2026-10-26) · **Affects:** durability guarantee, benchmark comparability
 
 ## Context
 
@@ -47,3 +48,6 @@ be acknowledged, so the file's directory entry is durable too.
 - **Linux-only, develop in a VM/container.** Would match the PRD exactly, but adds a required
   virtualization dependency to every local `verify.sh` run. Rejected for now; reconsider if the
   macOS path ever diverges in behavior rather than only in cost.
+  **Later accepted** — see [ADR-004](ADR-004-linux-is-the-supported-platform.md). The mapping table
+  above still stands and `SyncData` is unchanged; what changed is that only a Linux result counts
+  as evidence, macOS is no longer a supported target, and no macOS timing is published.

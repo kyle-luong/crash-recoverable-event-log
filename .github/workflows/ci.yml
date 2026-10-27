@@ -16,10 +16,8 @@ jobs:
           cmake --version
           c++ --version
           clang-format --version || true
+      # Same gate as a local milestone commit, on the supported platform (ADR-004):
+      # fast suite, exhaustive recovery sweep, then Release. Under main-first (ADR-005)
+      # this runs after the commit, as the independent clean-environment check.
       - name: Verify project
-        run: ./scripts/verify.sh
-      - name: Release build and suite
-        run: |
-          cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DEVENTLOG_SLOW_TESTS=ON
-          cmake --build build/release --parallel
-          ctest --test-dir build/release --output-on-failure
+        run: ./scripts/verify-full.sh

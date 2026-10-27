@@ -5,7 +5,9 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ROOT="$PWD"
-BUILD_DIR="${BUILD_DIR:-build/debug-asan}"
+# BUILD_ROOT may point outside the source tree, which is what lets the Linux container
+# verification mount this repository read-only.
+BUILD_DIR="${BUILD_DIR:-${BUILD_ROOT:-build}/debug-asan}"
 
 step() { printf '\n==> %s\n' "$1"; }
 
@@ -44,15 +46,8 @@ cmake --build "$BUILD_DIR" --parallel
 
 # --- test ---------------------------------------------------------------------
 step "Test (ctest)"
-# LeakSanitizer only exists on Linux; asking for it on macOS makes ASan abort on startup.
-if [ -z "${ASAN_OPTIONS:-}" ]; then
-  case "$(uname -s)" in
-    Linux) ASAN_OPTIONS="detect_leaks=1" ;;
-    *) ASAN_OPTIONS="detect_leaks=0" ;;
-  esac
-fi
-export ASAN_OPTIONS
-export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1}"
+# shellcheck source=scripts/sanitizer-env.sh
+. "$ROOT/scripts/sanitizer-env.sh"
 echo "ASAN_OPTIONS=$ASAN_OPTIONS"
 ctest --test-dir "$BUILD_DIR" --output-on-failure --parallel 4
 

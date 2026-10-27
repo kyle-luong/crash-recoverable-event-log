@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>

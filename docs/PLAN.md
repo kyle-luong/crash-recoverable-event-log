@@ -2,16 +2,18 @@
 
 Derived from `docs/PRD.md` §7. Each milestone is **independently verifiable**: it has one command
 that passes or fails on its own, without reference to later work. A milestone is `done` only when
-its command passes from a clean build directory.
+its command passes from a clean build directory **on Linux** — the supported platform
+([ADR-004](decisions/ADR-004-linux-is-the-supported-platform.md)). In practice that means
+`./scripts/verify-linux.sh`; a macOS pass is a convenience check, never the evidence.
 
 | M | PRD tasks | Deliverable | Verification command | State |
 |---|---|---|---|---|
 | **M0** | CPP-00 | CMake C++20 scaffold, warnings, sanitizer Debug path, Release target, format check, CI, docs | `./scripts/verify.sh` on a clean checkout | done |
-| **M1** | CPP-01…04 | Record codec + CRC32C, `sync_each` writer with advisory lock, log scanner, incomplete-tail recovery, `append`/`verify`/`recover` CLI | `./scripts/verify.sh` (138 cases) + `./scripts/verify-full.sh` | done |
-| **M2** | CPP-05, CPP-06 | `append_batch_and_sync` with whole-batch ack boundaries; scriptable `FileOps` fault injection (short write, `EINTR`, `EIO`, failed sync) driving recovery cases | `./scripts/verify.sh` + new `test_faults` suite | todo |
+| **M1** | CPP-01…04 | Record codec + CRC32C, `sync_each` writer with advisory lock, log scanner, incomplete-tail recovery, `append`/`verify`/`recover` CLI | `./scripts/verify-linux.sh` (142 cases, 7 suites) | done |
+| **M2** | CPP-05, CPP-06 | `append_batch_and_sync` with whole-batch ack boundaries; scriptable `FileOps` fault injection (short write, `EINTR`, `EIO`, failed sync) driving recovery cases | `./scripts/verify-linux.sh` incl. new `test_batch` suite | todo |
 | **M3** | CPP-07 | Subprocess supervisor, `SIGKILL` at instrumented checkpoints, independent ack oracle, acknowledged-prefix invariant over many runs | `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0 | todo |
 | **M4** | CPP-08 | Release benchmark: workload generator, records/sec, p50/p95/p99 durable-ack latency, environment capture, JSON output | `eventlog bench --trials 5 --out out/results.json`, reviewed against `benchmarks/README.md` methodology | todo |
-| **M5** | CPP-09 | Harden and release: full sanitizer sweep, CLI bounds and destructive-op guards, honest README with measured sample output, PR | `./scripts/verify-full.sh` + manual README review against PRD §5 | todo |
+| **M5** | CPP-09 | Harden and release: full sanitizer sweep, CLI bounds and destructive-op guards, honest README with measured sample output | `./scripts/verify-linux.sh` + manual README review against PRD §5 | todo |
 
 M2 and M3 are sequenced before M4 deliberately, per PRD §7: "never introduce [batch optimization]
 before the acknowledgment model is tested."
@@ -35,7 +37,7 @@ must not be described as satisfied.
 | CPP-AC10, AC11 | — | M3 |
 | CPP-AC12 | `cli_tests.sh` bounds, overwrite refusal, symlink refusal | M1 (extended in M5) |
 | CPP-AC13 | — | M4 |
-| CPP-AC14 | ASan + UBSan Debug build is the default `verify.sh` path; `-Werror` | M1 (full sweep M5) |
+| CPP-AC14 | ASan + UBSan Debug build is the default `verify.sh` path; `-Werror` under both GCC 12 (Linux) and Apple clang | M1 (full sweep M5) |
 | CPP-AC15 | `cli_tests.sh` file-hash-unchanged check across `verify` and `recover` without the flag | M1 |
 | CPP-AC16 | README guarantee-boundaries section, reviewed against PRD §1 | M5 |
 

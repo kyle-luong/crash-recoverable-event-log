@@ -97,7 +97,12 @@ Status PosixFileOps::Truncate(int fd, std::uint64_t length) {
 }
 
 Result<std::uint64_t> PosixFileOps::FileSize(int fd) {
-  struct ::stat info{};
+  // `stat` names both this struct and the syscall, so the type needs an elaborated
+  // specifier. Confining that to an alias keeps the declaration itself free of one:
+  // clang-format 14 and 17 disagree about `struct ::stat info{}` (14 inserts a space
+  // before the braces, 17 removes it), and the supported platform's formatter is 14.
+  using StatBuf = struct ::stat;
+  StatBuf info{};
   if (::fstat(fd, &info) != 0) return IoError("fstat", errno, "");
   if (info.st_size < 0) return Error(ErrorKind::kInternal, "fstat reported a negative size");
   return static_cast<std::uint64_t>(info.st_size);

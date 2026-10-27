@@ -33,6 +33,11 @@ returns success. The platform actually used is recorded in every benchmark and c
 because the two primitives have materially different cost and different guarantees. This does not
 alter any acceptance criterion; it makes the one named syscall a documented per-platform mapping.
 
+**Superseded 2026-10-26** by [ADR-004](decisions/ADR-004-linux-is-the-supported-platform.md): Linux
+is now the only supported platform and the only source of verification evidence, so the PRD's named
+primitive is the one actually exercised by the result this project reports. The mapping above still
+exists for the macOS convenience path, which states no guarantee of its own.
+
 ### R2 — Structurally invalid *complete* header: incomplete tail or hard corruption? (→ ADR-002)
 
 The PRD says an incomplete trailing record is recoverable and a "fully formed" corrupt record is

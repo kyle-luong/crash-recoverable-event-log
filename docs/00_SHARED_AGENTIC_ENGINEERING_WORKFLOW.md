@@ -218,13 +218,27 @@ Avoid arbitrary test-count or coverage quotas; use acceptance coverage: all docu
 
 ## 7. CI and Git policy
 
-- Feature branches: `feat/C-03-snapshots`, `feat/GO-05-replay`, `feat/CPP-06-crash-injection`.
+- **Main-first (trunk-based).** Commit verified work directly to `main`. No routine feature branches
+  and no routine pull requests. `./scripts/verify.sh` must pass before every commit — on a
+  trunk-based flow the local verification gate *is* the protection for `main`, so it is not
+  optional. Use a short-lived branch only for a genuine exception (an experiment likely to be
+  thrown away, or a change needing review before it reaches `main`), and fast-forward it back.
 - Commits represent genuine milestones or coherent changes; no contrived commit splitting.
-- Workflow uses `push` to `main` and `pull_request`, with no credentials for internet APIs. Set `permissions: contents: read` by default.
-- Protect `main` when repository settings/plan permit: PR required, passing CI required, no force-push or deletion. A solo owner reviews and merges manually (an automatic required _independent human_ reviewer is not necessary for a one-person repository).
-- PR must contain: scope, behavior, acceptance IDs, test command/result, known limits, performance evidence if claimed, any human decisions.
-- Do not run privileged network requests or arbitrary untrusted shell scripts in CI; use local controlled fixtures and temp dirs.
-- Do not auto-merge/deploy.
+- Because `main` is the integration point, never commit a known-broken intermediate state. Prefer
+  one larger verified commit over a sequence that leaves `main` red in the middle.
+- Workflow uses `push` to `main` and `pull_request`, with no credentials for internet APIs. Set
+  `permissions: contents: read` by default. CI remains the independent check that the commit builds
+  and passes on the primary platform in a clean environment.
+- Do not force-push `main` or rewrite pushed history.
+- A commit message carries what a PR body otherwise would: scope, behavior, acceptance IDs, test
+  command and result, known limits, performance evidence if claimed, and any human decisions.
+- Do not run privileged network requests or arbitrary untrusted shell scripts in CI; use local
+  controlled fixtures and temp dirs.
+- Do not auto-merge/deploy. Ask before the first remote push of a repository.
+- **One primary platform per project.** The PRD names it; it is the platform whose syscall contract
+  the acceptance criteria describe and the only one whose verification result counts as evidence. A
+  convenience path on a second platform is allowed while it stays cheap, must never widen or restate
+  a guarantee, and is not a supported target.
 
 Example `.github/workflows/ci.yml` (adapt job name and dependencies):
 

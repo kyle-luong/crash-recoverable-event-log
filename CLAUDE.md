@@ -9,7 +9,9 @@ Keep each change within the active task's acceptance criteria and non-goals (`do
 - `./scripts/verify.sh` — format check, `-Werror` build, ASan+UBSan Debug, full CTest suite. Run it
   for every change.
 - `./scripts/verify-full.sh` — adds the Release build and the slow exhaustive recovery sweep. Run it
-  before a significant PR or milestone commit.
+  before every milestone commit.
+- `./scripts/verify-linux.sh` — runs `verify-full.sh` inside a Linux container. **Only this result
+  counts as evidence** (see platform rule below). Needs a running Docker daemon.
 
 Never weaken or remove a test, and never change an acceptance criterion, to get a pass. If a test
 contradicts `docs/PRD.md`, stop and resolve the contradiction (workflow §2 source-of-truth order).
@@ -27,6 +29,10 @@ contradicts `docs/PRD.md`, stop and resolve the contradiction (workflow §2 sour
 - Validate payload length against both the 1 MiB bound and the bytes remaining in the file
   **before** allocating any payload buffer.
 - `SIGKILL` is not power loss, and `verify` is read-only. Do not let either claim drift in docs.
+- **Linux is the only supported platform** (ADR-004). It is the one whose `fdatasync(2)` contract
+  the PRD and acceptance criteria describe, and a Linux run is what counts as verification
+  evidence. macOS is an unsupported convenience path for the fast local edit loop: keep it only
+  while it stays cheap, never widen or restate a guarantee for it, and never quote its timings.
 - Binary format v1 is frozen. An incompatible change needs a new version number and human approval.
 
 ## Safety
@@ -35,12 +41,14 @@ Treat filesystem paths, process execution, and crash injection as dangerous: wri
 designated scratch directories, never follow a symlink for a destructive operation, and refuse to
 overwrite a nonempty file without an explicit flag.
 
-Keep `main` untouched; work on a task branch; do not force-push or merge.
+Main-first: commit verified work directly to `main`; no routine branches or PRs (workflow §7).
+`./scripts/verify.sh` must pass before every commit — it is the only gate protecting `main`. Never
+commit a known-broken intermediate state. Do not force-push `main` or rewrite pushed history.
 Human approval required for architecture or format changes, new dependencies, credential use,
 remote or destructive operations, and scope expansion.
 
 Before handoff, update `docs/STATUS.md` with what changed, the exact verification run, failures,
-the next step, and the branch and commit identifiers.
+the next step, and the commit identifiers.
 
 ## Code conventions
 

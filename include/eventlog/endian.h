@@ -16,7 +16,12 @@ inline std::uint64_t ByteValue(std::byte b) {
 }
 
 inline void StoreLe16(std::byte* dst, std::uint16_t value) {
-  for (unsigned i = 0; i < 2; ++i) dst[i] = static_cast<std::byte>((value >> (8u * i)) & 0xFFu);
+  // Widened explicitly before shifting. A std::uint16_t is promoted to `int` first, and
+  // `int & unsigned` is a sign-changing conversion that GCC rejects under
+  // -Wsign-conversion. The 32- and 64-bit stores need no such widening because their
+  // operands are already at least as wide as `int`.
+  const unsigned widened = value;
+  for (unsigned i = 0; i < 2; ++i) dst[i] = static_cast<std::byte>((widened >> (8u * i)) & 0xFFu);
 }
 
 inline void StoreLe32(std::byte* dst, std::uint32_t value) {

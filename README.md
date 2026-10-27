@@ -14,24 +14,33 @@ repository, because none have been measured yet.
 
 ## Build
 
+**Linux is the supported platform** — it is the one whose `fdatasync(2)` contract this project's
+guarantees are written against ([ADR-004](docs/decisions/ADR-004-linux-is-the-supported-platform.md)).
 Requires CMake 3.20+ and a C++20 compiler. No third-party dependencies.
 
 ```sh
 ./scripts/verify.sh        # format check, -Werror build, ASan+UBSan, all tests
 ./scripts/verify-full.sh   # the above plus the exhaustive recovery sweep and a Release build
+./scripts/verify-linux.sh  # verify-full.sh inside a Linux container — the result that counts
 ```
+
+`verify-linux.sh` mounts this repository read-only and builds in a container-local directory, so it
+cannot modify your working tree. It needs a running Docker daemon.
+
+macOS builds and passes as a convenience for the local edit loop, but it is not a supported target:
+no guarantee is stated for it and no timing from it is ever published.
 
 The binary lands at `build/debug-asan/eventlog` (or `build/release/eventlog`).
 
 ## Use
 
-Real output from a Release build on macOS/arm64 (APFS). Your numbers for file sizes will match;
-the durability barrier line depends on your platform.
+Real output from a Release build on Linux (Debian 12, aarch64, ext4), captured by
+`scripts/verify-linux.sh`'s toolchain. File sizes are deterministic, so yours will match.
 
 ```console
 $ eventlog append --file demo/events.log --records 1000 --payload-bytes 128
 Records appended: 1000  Durable acknowledged: 1000
-Policy: sync_each  Durability barrier: fcntl(F_FULLFSYNC)  File size: 152000 bytes
+Policy: sync_each  Durability barrier: fdatasync  File size: 152000 bytes
 
 $ eventlog verify --file demo/events.log
 Valid records: 1000   Last sequence: 1000   Status: clean
@@ -53,10 +62,14 @@ it would destroy before it does anything:
 ```console
 $ eventlog recover --file demo/events.log
 Status: incomplete_tail   Valid records: 999   Last sequence: 999
+Detail: trailing partial payload for sequence 1000: 88 of 128 bytes (offset 151848)
 Would discard 112 bytes: offsets 151848..151960 (one structurally incomplete trailing record).
 No change made. Re-run with --truncate-tail to apply.
 
 $ eventlog recover --file demo/events.log --truncate-tail
+Status: incomplete_tail   Valid records: 999   Last sequence: 999
+Detail: trailing partial payload for sequence 1000: 88 of 128 bytes (offset 151848)
+Would discard 112 bytes: offsets 151848..151960 (one structurally incomplete trailing record).
 Status: recovered_incomplete_tail   Discarded: 112 bytes   Valid records: 999   Last sequence: 999
 
 $ eventlog verify --file demo/events.log
@@ -85,16 +98,11 @@ barrier returns success for it. Until then it is `accepted`, which means the byt
 `write(2)` and nothing more. The two counters are separate in the API, in the CLI output, and in the
 tests.
 
-**The durability barrier is platform-specific** ([ADR-001](docs/decisions/ADR-001-durability-primitive.md)):
-
-| Platform | Call |
-|---|---|
-| Linux | `fdatasync(2)` — the primitive the PRD specifies |
-| macOS | `fcntl(F_FULLFSYNC)` — stronger than `fsync`, which does not flush the drive cache |
-| other POSIX | `fsync(2)` |
-
-Because these are different barriers with different costs, **throughput is not comparable across
-platforms**, and every future benchmark will record which one it used.
+**The barrier is `fdatasync(2)`** on the supported platform. All durability goes through a single
+`FileOps::SyncData` boundary ([ADR-001](docs/decisions/ADR-001-durability-primitive.md)), which maps
+to `fdatasync(2)` on Linux, `fcntl(F_FULLFSYNC)` on macOS, and `fsync(2)` on other POSIX systems.
+Only the Linux mapping is a supported guarantee, and only Linux numbers will ever be published, so
+there is no cross-platform comparison to mistrust.
 
 **A failed sync ends the writer session** ([ADR-003](docs/decisions/ADR-003-sync-failure-is-terminal.md)).
 On Linux a failed `fsync` can discard the dirty page and report the error only once, so retrying

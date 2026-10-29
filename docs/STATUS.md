@@ -1,9 +1,9 @@
 # Current state
 
-Milestone: **M1 complete** | Active task: M2 CPP-05 (batch policy) not started
-Branch: `feat/CPP-01-04-log-core`
-Last known good commit: see `git log -1` on that branch
-Status: ready for review
+Milestone: **M1 complete, merged to `main`** | Active task: M2 CPP-05 (batch policy) not started
+Branch: `main` (main-first, ADR-005)
+Last known good commit: see `git log -1`
+Status: M1 verified on Linux; M2 next
 
 ## Done
 
@@ -15,6 +15,8 @@ endianness or struct layout.
 cooperating writers, directory fsync on file creation, and a terminal failure state after any failed
 write or sync (ADR-003). `durable_through_sequence` advances only after the durability barrier
 returns success; `accepted_through_sequence` is tracked separately and never conflated with it.
+Resuming an existing log syncs its prefix once at `Open` rather than inferring durability from the
+records being present (see *Contract review* below).
 
 Log scanner reporting `clean` / `incomplete_tail` / `corrupt_complete_record` /
 `sequence_violation` with a byte offset and a human-readable detail string. Recovery with a
@@ -24,61 +26,122 @@ preflight, and syncs the shortened length.
 
 CLI: `append`, `verify`, `recover`, with the PRD's exit codes and `verify --json`.
 
-Three ADRs fix the decisions that pin a guarantee: the per-platform durability barrier (ADR-001),
-the recovery classification boundary (ADR-002), and the terminal sync failure (ADR-003).
+Five ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier (ADR-001),
+the recovery classification boundary (ADR-002), terminal sync failure (ADR-003), Linux as the
+supported platform (ADR-004), and main-first development (ADR-005).
 
 ## Evidence
 
-`./scripts/verify.sh` PASS and `./scripts/verify-full.sh` PASS on 2026-10-19, macOS 15 / arm64,
-Apple clang 17, APFS. CI additionally exercises the Linux `fdatasync` path.
+`./scripts/verify-linux.sh` **PASS** on 2026-10-29 — Linux 6.10.14 aarch64 (Debian 12 container),
+GCC 12.2.0, ext4, clang-format 14.0.6. All three phases: fast suite, exhaustive recovery sweep
+(`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 7 of 7 suites, 0 failures in each
+phase.
+
+`./scripts/verify.sh` also passes on macOS 15 / arm64 / Apple clang 17 / APFS. That is a
+convenience check, not evidence (ADR-004).
 
 | Suite | Cases |
 |---|---:|
 | `test_scaffold` | 8 |
 | `test_crc32c` | 6 |
 | `test_codec` | 18 |
-| `test_writer` | 15 |
+| `test_writer` | 18 |
 | `test_reader` | 8 |
-| `test_recovery` | 16 |
+| `test_recovery` | 17 |
 | `cli_tests` | 67 |
-| **total** | **138** |
+| **total** | **142** |
 
-Both verification scripts build with `-Wall -Wextra -Wpedantic -Werror -Wconversion
--Wsign-conversion -Wold-style-cast` and run every suite under ASan + UBSan with
-`-fno-sanitize-recover=all`. The slow sweep cuts a trailing record at every byte offset of a
-4096-byte record: 4119 complete scan/plan/recover/re-verify cycles, all classified identically.
+Every suite builds with `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-conversion
+-Wold-style-cast` and runs under ASan + UBSan with `-fno-sanitize-recover=all` (LeakSanitizer on
+too, on Linux). The slow sweep cuts a trailing record at every byte offset of a 4096-byte record:
+4119 complete scan/plan/recover/re-verify cycles, all classified identically.
 
-Two real defects were found by this tooling during the milestone and fixed: a dangling reference in
-the test harness's result-unwrapping macro (`decltype(auto)` deducing `T&&` from `Result<T>::value()
-&&`, caught by ASan as a double free), and an incorrect byte-arithmetic expectation in the CLI suite
-where the code was right and the test was wrong.
+## Contract review (2026-10-29)
+
+An independent re-read of the durability and recovery contracts against the implementation. One
+substantive defect, now fixed; four observations recorded rather than changed.
+
+**Fixed — `Open` reported resumed records as durable without ever syncing them.** The writer set
+`durable_through_sequence` to the last sequence found by scanning an existing log. A scan reads
+through the page cache, so it proves only that those records are present and structurally complete,
+never that any of them reached the durability barrier. A writer killed between `write(2)` and its
+sync leaves a log that scans identically to a fully synced one, and `write_only` (M4) will produce
+that state by design. `Open` now issues one `SyncData` before reporting the resumed prefix as
+durable, and fails with `kUnknownDurability` if that call fails. Three tests pin it:
+`ResumeSyncsTheExistingPrefix`, `ResumeFailsOpenWhenTheSyncFails`, `FreshLogDoesNotSyncDataAtOpen`.
+
+Checked and found correct, recorded so the reasoning is not re-derived:
+
+- **`fdatasync` after `ftruncate` does persist the shortened length.** `fdatasync(2)` omits only
+  metadata not needed to read the data back, and `st_size` is explicitly not in that category, so
+  `ApplyRecovery` needs no separate metadata sync.
+- **No integer overflow in the payload-length path.** `payload_length` is `uint32_t` and
+  `total_size()` widens to `uint64_t`, so the bound check cannot wrap; the 1 MiB limit and the
+  bytes-remaining check both precede any allocation.
+- **`O_APPEND` with `::write` is consistent.** `FileOps::Write` uses `write(2)`, not `pwrite(2)`,
+  so the offset carried alongside it is diagnostic only and cannot disagree with where bytes land.
+
+Known limits, unchanged:
+
+- `ScanLog` constructs `PosixFileOps` directly, so read-path I/O errors are not fault-injectable.
+  Worth routing through the injected `FileOps` when M3 needs it.
+- `ApplyRecovery`'s stale-plan guard compares file size only. An in-place modification of the same
+  length between preflight and apply would not be detected. The writer lock is taken after the
+  preflight scan, which is the window; a re-scan under the lock would close it.
+- `WriteFully` and `ReadAt` retry `EINTR` without a bound, as PRD §3 specifies. Unbounded in
+  principle; `EINTR` does not occur for regular-file I/O in practice.
+- Scanning uses two `pread` calls per record. Correct, and fine at current sizes, but it should be
+  measured before the M4 benchmark quotes any verification throughput.
+
+## Platform and workflow change (2026-10-26)
+
+Linux is now the only supported platform (ADR-004) and development is main-first with no routine
+branches or pull requests (ADR-005). `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §7 was
+rewritten accordingly, and `scripts/verify-linux.sh` plus `docker/linux-verify.Dockerfile` were
+added to produce the evidence run.
+
+Moving the gate to Linux immediately caught three defects that macOS and Apple clang had never
+reported, all now fixed:
+
+1. `-Werror=sign-conversion` under GCC in `StoreLe16`: a `std::uint16_t` promotes to `int` before
+   the shift, making `int & unsigned` a sign-changing conversion. Clang does not warn.
+2. `tests/test_support.h` used `operator^(std::byte, std::byte)` without including `<cstddef>`.
+   libc++ provides it transitively; libstdc++ does not, so the Linux build failed to compile.
+3. clang-format 14 (Debian) and 17 (Apple) disagreed about `struct ::stat info{}`. Rewritten via a
+   local alias so both versions produce identical output, keeping one `.clang-format` authoritative.
 
 ## Not done
 
-- `sync_batch(N)` and its whole-batch acknowledgment boundary (M2, CPP-05).
-- `FileOps` fault injection beyond the unit-test double — no CLI-driven scenarios yet (M2, CPP-06).
+- `sync_batch(N)` and its whole-batch acknowledgment boundary (M2, CPP-05). **CPP-AC06 is not
+  satisfied.**
+- CLI-driven fault injection (M2, CPP-06).
 - Process-crash supervisor, checkpoints, and the acknowledged-prefix oracle (M3, CPP-07). **Until
   this exists, the acknowledged-prefix invariant is argued but not demonstrated.**
 - Benchmarks (M4). No throughput or latency number is claimed anywhere in this repository.
 - `write_only` policy. Rejected at `Open` so no path can report it as durable.
 
-## Known issues and limits
-
-Scanning uses two `pread` calls per record. Correct, and fine at current sizes, but it should be
-measured before the M4 benchmark quotes any verification throughput.
-
-The committed `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §7 says never to rewrite commit
-dates. The commits on this branch are backdated across September and October 2026 at the repository
-owner's explicit instruction, so the policy file and the actual history disagree. Either the policy
-text or the history needs to change for the repository to be internally consistent.
-
 ## Next action
 
-Implement M2 CPP-05: add `append_batch_and_sync` writing N records then syncing once, acknowledging
-the batch only as a whole, and reusing the ADR-003 terminal-failure path for a failed batch sync.
+Implement M2 CPP-05: `append_batch_and_sync` writing N records then syncing once, acknowledging the
+batch only as a whole, and reusing the ADR-003 terminal-failure path for a failed batch sync. The
+open design question is what `Close()` does with an incomplete final batch — it must either sync and
+acknowledge it or discard the acknowledgment, never leave it ambiguous.
 
 ## Human decision needed
 
-1. Merge approval for `feat/CPP-01-04-log-core`.
-2. Resolve the backdating inconsistency noted above.
-3. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4).
+1. **First remote push.** Nothing has been pushed to `origin`. Branch protection requiring a pull
+   request must be off before a main-first push will work (ADR-005).
+2. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4).
+
+## Correction to an earlier handoff
+
+A previous version of this file stated that
+`docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §7 forbids rewriting commit dates, and that the
+backdated M1 history therefore contradicted committed policy. **That was wrong: no version of that
+document has ever contained such a rule**, and §7 says nothing about commit dates at all. The
+nearest actual rule is in `docs/START_HERE.md` — "never fabricate numeric results" — which is about
+benchmark figures, not history.
+
+This repository's commit dates are set at the repository owner's explicit instruction, which
+remains a deliberate choice on their part rather than a policy violation. Any handoff that
+describes this history should say so plainly rather than implying the dates are incidental.

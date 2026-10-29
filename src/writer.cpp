@@ -85,6 +85,22 @@ Result<EventLogWriter> EventLogWriter::Open(const std::filesystem::path& path,
           .at_offset(scan.value().problem_offset);
     }
     last_sequence = scan.value().last_sequence;
+
+    // The scan proves those records are present and structurally complete. It does not
+    // prove any of them was ever synced: a previous writer may have been killed between
+    // write() and SyncData, or (from M4) have run a non-durable policy. Presence is not
+    // durability, so this session establishes it with one sync rather than inheriting a
+    // claim it cannot check (ADR-001). Only after this does durable_through_ start at
+    // last_sequence.
+    Status resumed = ops->SyncData(file.fd.get());
+    if (!resumed.ok()) {
+      return Error(ErrorKind::kUnknownDurability,
+                   std::string(SyncPrimitiveName()) + " failed while resuming " + path.string() +
+                       "; whether its " + std::to_string(scan.value().valid_records) +
+                       " existing records are durable is unknown (" + resumed.error().message() +
+                       ")",
+                   resumed.error().errno_value());
+    }
   }
 
   EventLogWriter writer(std::move(file.fd), std::move(ops), options.policy, last_sequence,

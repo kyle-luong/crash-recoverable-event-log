@@ -315,12 +315,83 @@ TEST(ContinuesSequenceNumberingOnExistingLog) {
   options.allow_existing = true;
   EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
   EL_CHECK_EQ(writer.accepted_through_sequence(), std::uint64_t{4});
-  // Already-durable records stay acknowledged across a reopen.
+  // Durable only because Open synced the resumed prefix; see ResumeSyncsTheExistingPrefix.
   EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{4});
   EL_CHECK_EQ(EL_EXPECT_OK(writer.AppendAndSync(Payload(20))).sequence, std::uint64_t{5});
   EL_EXPECT_STATUS_OK(writer.Close());
 
   EL_CHECK_EQ(EL_EXPECT_OK(ScanLog(path)).last_sequence, std::uint64_t{5});
+}
+
+// Resuming a log must not infer durability from the records merely being present. The
+// scan reads through the page cache, so it cannot distinguish a prefix that was synced
+// from one written by a writer that died before its sync (or, from M4, from a
+// deliberately non-durable policy). Open establishes the claim with one sync instead.
+TEST(ResumeSyncsTheExistingPrefix) {
+  const test::TempDir dir("writer-resume-sync");
+  const auto path = dir.file("events.log");
+
+  {
+    EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, WriterOptions{}));
+    for (int i = 0; i < 3; ++i) EL_EXPECT_OK(writer.AppendAndSync(Payload(12)));
+    EL_EXPECT_STATUS_OK(writer.Close());
+  }
+
+  auto ops = std::make_shared<ScriptedFileOps>();
+  WriterOptions options;
+  options.allow_existing = true;
+  options.file_ops = ops;
+
+  EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
+  // One sync, charged to Open, before a single record of this session has been written.
+  EL_CHECK_EQ(ops->sync_calls, 1);
+  EL_CHECK_EQ(ops->write_calls, 0);
+  EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{3});
+  EL_EXPECT_STATUS_OK(writer.Close());
+}
+
+// If that resume sync fails, the writer must not open at all: it cannot honestly report
+// the existing records as durable, and ADR-003 forbids retrying the sync.
+TEST(ResumeFailsOpenWhenTheSyncFails) {
+  const test::TempDir dir("writer-resume-sync-fails");
+  const auto path = dir.file("events.log");
+
+  {
+    EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, WriterOptions{}));
+    for (int i = 0; i < 2; ++i) EL_EXPECT_OK(writer.AppendAndSync(Payload(12)));
+    EL_EXPECT_STATUS_OK(writer.Close());
+  }
+
+  auto ops = std::make_shared<ScriptedFileOps>();
+  ops->fail_sync_after = 0;  // the resume sync itself fails
+  WriterOptions options;
+  options.allow_existing = true;
+  options.file_ops = ops;
+
+  EL_EXPECT_ERROR(EventLogWriter::Open(path, options), ErrorKind::kUnknownDurability);
+  EL_CHECK_EQ(ops->sync_calls, 1);
+  EL_CHECK_EQ(ops->write_calls, 0);
+
+  // The log itself is untouched: a failed resume is not a destructive event.
+  const ScanReport report = EL_EXPECT_OK(ScanLog(path));
+  EL_CHECK(report.clean());
+  EL_CHECK_EQ(report.valid_records, std::uint64_t{2});
+}
+
+// A newly created log has no prefix to establish, so Open syncs the directory entry and
+// nothing else. Guards against charging every fresh writer a pointless data sync.
+TEST(FreshLogDoesNotSyncDataAtOpen) {
+  const test::TempDir dir("writer-fresh-no-sync");
+  const auto path = dir.file("events.log");
+
+  auto ops = std::make_shared<ScriptedFileOps>();
+  WriterOptions options;
+  options.file_ops = ops;
+
+  EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
+  EL_CHECK_EQ(ops->sync_calls, 0);
+  EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{0});
+  EL_EXPECT_STATUS_OK(writer.Close());
 }
 
 TEST(RefusesToAppendToADamagedLog) {

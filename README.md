@@ -104,6 +104,12 @@ to `fdatasync(2)` on Linux, `fcntl(F_FULLFSYNC)` on macOS, and `fsync(2)` on oth
 Only the Linux mapping is a supported guarantee, and only Linux numbers will ever be published, so
 there is no cross-platform comparison to mistrust.
 
+**Resuming a log re-establishes durability rather than assuming it.** Opening an existing log scans
+it, which proves its records are present and complete — not that any of them was ever synced. So
+`Open` issues one barrier call before reporting the existing prefix as durable. A writer killed
+between `write(2)` and its sync leaves records that a scan cannot distinguish from synced ones, and
+inheriting that claim would be exactly the conflation this project exists to avoid.
+
 **A failed sync ends the writer session** ([ADR-003](docs/decisions/ADR-003-sync-failure-is-terminal.md)).
 On Linux a failed `fsync` can discard the dirty page and report the error only once, so retrying
 could return success over permanently lost data. The writer refuses to acknowledge anything after

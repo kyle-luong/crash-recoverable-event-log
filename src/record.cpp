@@ -39,8 +39,8 @@ void EncodeHeader(std::uint64_t sequence, std::uint16_t flags, std::span<const s
   StoreLe32(out.data() + kCrcOffset, ComputeRecordCrc(sequence, flags, payload));
 }
 
-Status EncodeRecordInto(std::vector<std::byte>& out, std::uint64_t sequence,
-                        std::span<const std::byte> payload) {
+Status AppendRecordTo(std::vector<std::byte>& out, std::uint64_t sequence,
+                      std::span<const std::byte> payload) {
   if (sequence < kFirstSequence) {
     return Error(ErrorKind::kInvalidArgument, "sequence numbers start at 1");
   }
@@ -51,11 +51,17 @@ Status EncodeRecordInto(std::vector<std::byte>& out, std::uint64_t sequence,
   }
   HeaderBytes header{};
   EncodeHeader(sequence, 0, payload, header);
-  out.clear();
-  out.reserve(kHeaderSize + payload.size());
+  out.reserve(out.size() + kHeaderSize + payload.size());
   out.insert(out.end(), header.begin(), header.end());
   out.insert(out.end(), payload.begin(), payload.end());
   return Status::Ok();
+}
+
+Status EncodeRecordInto(std::vector<std::byte>& out, std::uint64_t sequence,
+                        std::span<const std::byte> payload) {
+  // Validate before clearing, so a rejected record cannot destroy the caller's buffer.
+  if (sequence >= kFirstSequence && payload.size() <= kMaxPayloadBytes) out.clear();
+  return AppendRecordTo(out, sequence, payload);
 }
 
 Result<std::vector<std::byte>> EncodeRecord(std::uint64_t sequence,

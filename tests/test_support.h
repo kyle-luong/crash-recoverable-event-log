@@ -59,6 +59,18 @@ std::string Describe(const T& value) {
     out << static_cast<std::int64_t>(static_cast<std::underlying_type_t<std::decay_t<T>>>(value));
   } else if constexpr (std::is_same_v<std::decay_t<T>, bool>) {
     out << (value ? "true" : "false");
+  } else if constexpr (std::is_same_v<std::decay_t<T>, std::vector<std::byte>>) {
+    // Byte buffers are compared whole but printed as a prefix: a failing comparison of
+    // two multi-kilobyte logs should not bury the message it belongs to.
+    out << value.size() << " bytes [";
+    const std::size_t shown = value.size() < 12 ? value.size() : 12;
+    for (std::size_t i = 0; i < shown; ++i) {
+      if (i > 0) out << ' ';
+      out << std::hex << (static_cast<unsigned>(value[i]) >> 4u)
+          << (static_cast<unsigned>(value[i]) & 0xFu) << std::dec;
+    }
+    if (shown < value.size()) out << " ...";
+    out << ']';
   } else {
     out << value;
   }

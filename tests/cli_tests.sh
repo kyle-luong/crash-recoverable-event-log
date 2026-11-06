@@ -194,8 +194,38 @@ expect_code "crash-test reports it is not implemented" 64 crash-test --runs 1
 expect_output_contains "crash-test names its milestone" "M3"
 expect_code "bench reports it is not implemented" 64 bench --records 1
 expect_output_contains "bench names its milestone" "M4"
-expect_code "sync_batch policy is rejected" 10 append --file "$WORKDIR/b.log" --records 1 --payload-bytes 8 --policy sync_batch
+expect_code "write_only policy is rejected" 10 append --file "$WORKDIR/b.log" --records 1 --payload-bytes 8 --policy write_only
+expect_output_contains "write_only names its milestone" "M4"
 expect_code "unknown policy is a usage error" 64 append --file "$WORKDIR/c.log" --records 1 --payload-bytes 8 --policy turbo
+
+# --- sync_batch (CPP-05 / CPP-AC06) ------------------------------------------
+expect_code "sync_batch appends" 0 append --file "$WORKDIR/batch.log" --records 100 --payload-bytes 64 --policy sync_batch --batch-size 32
+expect_output_contains "sync_batch acknowledges every record" "Durable acknowledged: 100"
+expect_output_contains "sync_batch labels its batch size" "Policy: sync_batch(32)"
+# 100 records in groups of 32 is four acknowledgment units, not one hundred.
+expect_output_contains "sync_batch reports four acknowledgments" "Acknowledgments: 4"
+expect_output_contains "sync_batch reports four barrier calls" "Barrier calls: 4"
+run verify --file "$WORKDIR/batch.log"
+expect_output_contains "sync_batch log verifies clean" "Status: clean"
+expect_output_contains "sync_batch log holds every record" "Valid records: 100"
+
+# The two policies must produce identical bytes: they differ only in when the barrier
+# is called, never in what is written.
+expect_code "sync_each writes the same workload" 0 append --file "$WORKDIR/each.log" --records 100 --payload-bytes 64
+if [ "$(file_hash "$WORKDIR/batch.log")" = "$(file_hash "$WORKDIR/each.log")" ]; then
+  ok "sync_batch and sync_each produce identical bytes"
+else
+  bad "sync_batch and sync_each produce identical bytes" "hashes differ"
+fi
+run append --file "$WORKDIR/each.log2" --records 100 --payload-bytes 64
+expect_output_contains "sync_each costs one barrier call per record" "Barrier calls: 100"
+
+expect_code "sync_batch rejects batch-size 1" 10 append --file "$WORKDIR/b1.log" --records 4 --payload-bytes 8 --policy sync_batch --batch-size 1
+expect_code "sync_batch rejects an oversized batch-size" 10 append --file "$WORKDIR/b2.log" --records 4 --payload-bytes 8 --policy sync_batch --batch-size 99999
+expect_code "an over-large batch buffer is a usage error" 64 append --file "$WORKDIR/b3.log" --records 4 --payload-bytes 1048576 --policy sync_batch --batch-size 4000
+expect_code "sync_batch resumes an existing log" 0 append --file "$WORKDIR/batch.log" --records 20 --payload-bytes 64 --policy sync_batch --batch-size 8 --append-existing
+run verify --file "$WORKDIR/batch.log"
+expect_output_contains "resumed sync_batch log verifies clean" "Valid records: 120"
 
 # --- edge cases --------------------------------------------------------------
 expect_code "zero records succeeds" 0 append --file "$WORKDIR/zero.log" --records 0 --payload-bytes 8

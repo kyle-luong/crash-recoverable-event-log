@@ -5,6 +5,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -27,7 +28,7 @@ void PrintUsage(std::ostream& out) {
 
 Usage:
   eventlog append  --file PATH --records N --payload-bytes B
-                   [--policy sync_each] [--batch-size N]
+                   [--policy sync_each|sync_batch] [--batch-size N]
                    [--append-existing | --overwrite]
   eventlog verify  --file PATH [--json PATH]
   eventlog recover --file PATH [--truncate-tail]
@@ -36,6 +37,9 @@ Usage:
 Commands:
   append    Append N deterministic synthetic records. Reports how many were
             acknowledged DURABLE, which happens only after a successful sync.
+            sync_each syncs every record. sync_batch writes --batch-size
+            records as one write, syncs once, and acknowledges that whole
+            batch together; a batch that fails acknowledges none of itself.
   verify    Read-only. Validates framing, CRC32C, and the sequence chain.
             Exit 0 clean, 1 incomplete trailing record, 2 hard corruption.
   recover   Reports a structurally incomplete trailing record. Truncates it only
@@ -45,7 +49,7 @@ Durability: a record counts as durable only after this platform's barrier
 ()" << SyncPrimitiveName()
       << R"() returns success. A process kill is not a power failure.
 
-Planned in later milestones: crash-test (M3), bench (M4), sync_batch (M2).
+Planned in later milestones: crash-test (M3), bench and write_only (M4).
 )";
 }
 
@@ -219,33 +223,71 @@ int CommandAppend(int argc, char** argv) {
 
   const std::uint64_t first_sequence = writer.accepted_through_sequence() + 1;
   const std::size_t size = static_cast<std::size_t>(payload_bytes.value());
-  std::vector<std::byte> payload(size);
+  const std::size_t group = options.policy == SyncPolicy::kSyncBatch ? writer.batch_size() : 1;
+
+  // One batch is held in memory at a time, so the group is bounded before anything is
+  // allocated for it. The writer enforces the same ceiling; failing here gives the
+  // caller a usage error instead of a mid-run one.
+  const std::uint64_t group_bytes =
+      static_cast<std::uint64_t>(group) * (static_cast<std::uint64_t>(kHeaderSize) + size);
+  if (group_bytes > kMaxBatchBytes) {
+    Status closed = writer.Close();
+    if (!closed.ok()) std::cerr << "error: " << closed.error().message() << "\n";
+    return FailUsage(Error(ErrorKind::kLimitExceeded,
+                           "--batch-size " + std::to_string(group) + " at " + std::to_string(size) +
+                               " payload bytes needs " + std::to_string(group_bytes) +
+                               " bytes per batch; the limit is " + std::to_string(kMaxBatchBytes)));
+  }
+
+  std::vector<std::vector<std::byte>> payloads(group, std::vector<std::byte>(size));
+  std::vector<std::span<const std::byte>> spans;
+  spans.reserve(group);
   std::uint64_t appended = 0;
 
-  for (std::uint64_t i = 0; i < records.value(); ++i) {
-    FillDeterministicPayload(first_sequence + i, payload);
-    Result<AppendResult> result = writer.AppendAndSync(payload);
-    if (!result.ok()) {
-      std::cerr << "error: " << result.error().message() << "\n";
-      std::cerr << "Records appended: " << appended
-                << "  Durable acknowledged: " << writer.durable_through_sequence() << "\n";
-      // Close is still attempted so the lock is released and errors are not hidden.
-      Status closed = writer.Close();
-      if (!closed.ok()) std::cerr << "error: " << closed.error().message() << "\n";
-      return kExitRuntimeError;
+  const auto report_failure = [&](const Error& error) {
+    std::cerr << "error: " << error.message() << "\n";
+    std::cerr << "Records appended: " << appended
+              << "  Durable acknowledged: " << writer.durable_through_sequence() << "\n";
+    // Close is still attempted so the lock is released and errors are not hidden.
+    Status closed = writer.Close();
+    if (!closed.ok()) std::cerr << "error: " << closed.error().message() << "\n";
+    return kExitRuntimeError;
+  };
+
+  while (appended < records.value()) {
+    const std::uint64_t remaining = records.value() - appended;
+    const std::size_t count = remaining < group ? static_cast<std::size_t>(remaining) : group;
+    const std::uint64_t batch_first = first_sequence + appended;
+
+    spans.clear();
+    for (std::size_t i = 0; i < count; ++i) {
+      FillDeterministicPayload(batch_first + i, payloads[i]);
+      spans.emplace_back(payloads[i]);
     }
-    ++appended;
+
+    if (options.policy == SyncPolicy::kSyncBatch) {
+      Result<BatchAppendResult> result = writer.AppendBatchAndSync(spans);
+      if (!result.ok()) return report_failure(result.error());
+    } else {
+      Result<AppendResult> result = writer.AppendAndSync(spans[0]);
+      if (!result.ok()) return report_failure(result.error());
+    }
+    appended += count;
   }
 
   const std::uint64_t durable = writer.durable_through_sequence();
   const std::uint64_t bytes = writer.file_offset();
+  const WriterStats stats = writer.stats();
   Status closed = writer.Close();
   if (!closed.ok()) return Fail(closed.error(), kExitRuntimeError);
 
   std::cout << "Records appended: " << appended << "  Durable acknowledged: " << durable << "\n";
-  std::cout << "Policy: " << SyncPolicyName(options.policy)
-            << "  Durability barrier: " << SyncPrimitiveName() << "  File size: " << bytes
+  std::cout << "Policy: " << SyncPolicyName(options.policy);
+  if (options.policy == SyncPolicy::kSyncBatch) std::cout << "(" << group << ")";
+  std::cout << "  Durability barrier: " << SyncPrimitiveName() << "  File size: " << bytes
             << " bytes\n";
+  std::cout << "Acknowledgments: " << stats.batches << "  Barrier calls: " << stats.sync_calls
+            << "  Write calls: " << stats.write_calls << "\n";
   return kExitOk;
 }
 

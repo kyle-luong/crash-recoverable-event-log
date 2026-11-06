@@ -1,9 +1,9 @@
 # Current state
 
-Milestone: **M1 complete, merged to `main`** | Active task: M2 CPP-05 (batch policy) not started
+Milestone: **M2 complete** | Active task: none; M3 CPP-07 (crash harness) not started
 Branch: `main` (main-first, ADR-005)
 Last known good commit: see `git log -1`
-Status: M1 verified on Linux; M2 next
+Status: M1 and M2 verified on Linux; nothing pushed to `origin`
 
 ## Done
 
@@ -24,17 +24,31 @@ read-only preflight and opt-in `--truncate-tail` that discards only a structural
 trailing record (ADR-002), refuses symlinks, holds the writer lock, re-checks the file against the
 preflight, and syncs the shortened length.
 
-CLI: `append`, `verify`, `recover`, with the PRD's exit codes and `verify --json`.
+`sync_batch` writer (M2): `AppendBatchAndSync` encodes N records into one contiguous buffer,
+issues one `write`, issues one barrier call, and acknowledges the whole batch only afterward
+(ADR-006). Batches are explicit calls rather than hidden buffering, so nothing is left
+accepted-but-unsynced between calls and `Close()` has no partial batch to resolve. A failed write
+or sync acknowledges no record in the batch and is terminal. Batch bounds (`batch_size`,
+`kMaxBatchRecords`, `kMaxBatchBytes`) are all checked before the batch buffer is allocated.
 
-Five ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier (ADR-001),
+`WriterStats` counts write calls, barrier calls, acknowledgment units, records and bytes, so the
+batching tradeoff is checked by assertion instead of prose: `sync_batch(32)` performs one write and
+one barrier call where `sync_each` performs 32 of each, and both produce byte-identical files.
+These are counts, not timings. **No throughput or latency number is measured or claimed.**
+
+CLI: `append` (now with `--policy sync_batch --batch-size N`), `verify`, `recover`, with the PRD's
+exit codes and `verify --json`.
+
+Six ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier (ADR-001),
 the recovery classification boundary (ADR-002), terminal sync failure (ADR-003), Linux as the
-supported platform (ADR-004), and main-first development (ADR-005).
+supported platform (ADR-004), main-first development (ADR-005), and the batch acknowledgment
+boundary (ADR-006).
 
 ## Evidence
 
-`./scripts/verify-linux.sh` **PASS** on 2026-10-29 — Linux 6.10.14 aarch64 (Debian 12 container),
+`./scripts/verify-linux.sh` **PASS** on 2026-11-05 — Linux 6.10.14 aarch64 (Debian 12 container),
 GCC 12.2.0, ext4, clang-format 14.0.6. All three phases: fast suite, exhaustive recovery sweep
-(`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 7 of 7 suites, 0 failures in each
+(`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 8 of 8 suites, 0 failures in each
 phase.
 
 `./scripts/verify.sh` also passes on macOS 15 / arm64 / Apple clang 17 / APFS. That is a
@@ -46,10 +60,11 @@ convenience check, not evidence (ADR-004).
 | `test_crc32c` | 6 |
 | `test_codec` | 18 |
 | `test_writer` | 18 |
+| `test_batch` | 12 |
 | `test_reader` | 8 |
 | `test_recovery` | 17 |
-| `cli_tests` | 67 |
-| **total** | **142** |
+| `cli_tests` | 83 |
+| **total** | **170** |
 
 Every suite builds with `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-conversion
 -Wold-style-cast` and runs under ASan + UBSan with `-fno-sanitize-recover=all` (LeakSanitizer on
@@ -112,9 +127,6 @@ reported, all now fixed:
 
 ## Not done
 
-- `sync_batch(N)` and its whole-batch acknowledgment boundary (M2, CPP-05). **CPP-AC06 is not
-  satisfied.**
-- CLI-driven fault injection (M2, CPP-06).
 - Process-crash supervisor, checkpoints, and the acknowledged-prefix oracle (M3, CPP-07). **Until
   this exists, the acknowledged-prefix invariant is argued but not demonstrated.**
 - Benchmarks (M4). No throughput or latency number is claimed anywhere in this repository.
@@ -122,10 +134,17 @@ reported, all now fixed:
 
 ## Next action
 
-Implement M2 CPP-05: `append_batch_and_sync` writing N records then syncing once, acknowledging the
-batch only as a whole, and reusing the ADR-003 terminal-failure path for a failed batch sync. The
-open design question is what `Close()` does with an incomplete final batch — it must either sync and
-acknowledge it or discard the acknowledgment, never leave it ambiguous.
+M3 CPP-07: the process-crash supervisor. A child writes under an instrumented checkpoint, the
+parent records each `(sequence, durable)` acknowledgment to memory *before* issuing the kill, then
+kills, reopens and recovers. The oracle assertion is one-directional — every acknowledged record
+must appear in the recovered log; records recovered but never acknowledged are permitted.
+
+The M2 design question about `Close()` and a partial batch did not survive the design: explicit
+batches mean there is never a partial batch to resolve (ADR-006).
+
+Two things worth doing when M3 touches them: route `ScanLog` through the injected `FileOps` so
+read-path I/O errors become testable, and re-scan under the writer lock in `ApplyRecovery` instead
+of comparing file size alone.
 
 ## Human decision needed
 

@@ -7,10 +7,11 @@ durable before the process died?*
 This is not a database, a queue, or a distributed log. It is one local file, one writer, a
 checksummed record format, and a recovery path that refuses to guess.
 
-**Status:** milestone M1 complete — record format, `sync_each` durable writer, log verification, and
-incomplete-tail recovery. Batching, the process-crash harness, and benchmarks are specified and not
-yet built; see [docs/PLAN.md](docs/PLAN.md). No performance numbers are claimed anywhere in this
-repository, because none have been measured yet.
+**Status:** milestones M1–M2 complete — record format, `sync_each` and `sync_batch` writers, log
+verification, incomplete-tail recovery, and fault injection over the syscall boundary. The
+process-crash harness and benchmarks are specified and not yet built; see
+[docs/PLAN.md](docs/PLAN.md). No performance numbers are claimed anywhere in this repository,
+because none have been measured yet.
 
 ## Build
 
@@ -45,6 +46,19 @@ Policy: sync_each  Durability barrier: fdatasync  File size: 152000 bytes
 $ eventlog verify --file demo/events.log
 Valid records: 1000   Last sequence: 1000   Status: clean
 ```
+
+The same workload under `sync_batch`, which writes and acknowledges 32 records at a time:
+
+```console
+$ eventlog append --file demo/batched.log --records 1000 --payload-bytes 128 \
+      --policy sync_batch --batch-size 32
+Records appended: 1000  Durable acknowledged: 1000
+Policy: sync_batch(32)  Durability barrier: fdatasync  File size: 152000 bytes
+Acknowledgments: 32  Barrier calls: 32  Write calls: 32
+```
+
+Same bytes on disk, 32 barrier calls instead of 1000. The last batch holds 8 records, not 32, and
+is acknowledged exactly like a full one.
 
 Now simulate an interrupted trailing write by cutting 40 bytes off the end of the file:
 
@@ -109,6 +123,24 @@ it, which proves its records are present and complete — not that any of them w
 `Open` issues one barrier call before reporting the existing prefix as durable. A writer killed
 between `write(2)` and its sync leaves records that a scan cannot distinguish from synced ones, and
 inheriting that claim would be exactly the conflation this project exists to avoid.
+
+**A batch is acknowledged as a unit or not at all**
+([ADR-006](docs/decisions/ADR-006-batch-acknowledgment-boundary.md)). `sync_batch` writes N records
+as one `write(2)`, calls the barrier once, and only then acknowledges all N. If either call fails,
+no record in the batch is acknowledged. Records from a failed batch may still be on disk, complete
+and valid — that is permitted, because the invariant runs one way only: every acknowledged record
+must be recoverable, never the reverse.
+
+Batches are explicit calls rather than hidden buffering, so the acknowledgment boundary is always a
+call boundary. Nothing is left accepted-but-unsynced between calls, which means `Close()` has no
+partial batch to resolve and the boundary never depends on how the process exits.
+
+**What batching costs you.** A larger batch is more unacknowledged work in flight to lose if the
+process dies. What it buys is syscalls, and that part is checked by assertion rather than asserted
+in prose: for 32 records, `sync_batch(32)` performs exactly one write and one barrier call where
+`sync_each` performs thirty-two of each, and both produce byte-identical files. Whether fewer
+barrier calls translate into proportionally more throughput is a measurement, not a deduction, and
+it belongs to M4 — so no speedup is claimed here.
 
 **A failed sync ends the writer session** ([ADR-003](docs/decisions/ADR-003-sync-failure-is-terminal.md)).
 On Linux a failed `fsync` can discard the dirty page and report the error only once, so retrying

@@ -31,16 +31,26 @@ Result<SyncPolicy> ParseSyncPolicy(std::string_view name) {
 
 Result<EventLogWriter> EventLogWriter::Open(const std::filesystem::path& path,
                                             const WriterOptions& options) {
-  // Milestone M1 implements one policy. The others are rejected here rather than
-  // silently degraded, so no code path can report an unimplemented policy's result as
-  // durable (docs/PLAN.md, milestone 1 scope boundary).
-  if (options.policy != SyncPolicy::kSyncEach) {
+  // write_only is rejected here rather than silently degraded, so no code path can
+  // report an unimplemented policy's result as durable (docs/PLAN.md scope boundary).
+  if (options.policy == SyncPolicy::kWriteOnly) {
     return Error(ErrorKind::kUnsupportedPolicy,
-                 std::string(SyncPolicyName(options.policy)) +
-                     " is not implemented yet; milestone M1 provides sync_each only");
+                 "write_only is not implemented yet; it arrives with the M4 benchmark, where "
+                 "it reports accepted records and never calls them durable");
   }
-  if (options.batch_size != 1) {
+  if (options.policy == SyncPolicy::kSyncEach && options.batch_size != 1) {
     return Error(ErrorKind::kInvalidArgument, "sync_each requires batch-size 1");
+  }
+  if (options.policy == SyncPolicy::kSyncBatch) {
+    if (options.batch_size < 2) {
+      return Error(ErrorKind::kInvalidArgument,
+                   "sync_batch requires batch-size of at least 2; use sync_each for 1");
+    }
+    if (options.batch_size > kMaxBatchRecords) {
+      return Error(ErrorKind::kLimitExceeded, "batch-size " + std::to_string(options.batch_size) +
+                                                  " exceeds the limit of " +
+                                                  std::to_string(kMaxBatchRecords));
+    }
   }
 
   std::shared_ptr<FileOps> ops = options.file_ops ? options.file_ops : DefaultFileOps();
@@ -103,12 +113,12 @@ Result<EventLogWriter> EventLogWriter::Open(const std::filesystem::path& path,
     }
   }
 
-  EventLogWriter writer(std::move(file.fd), std::move(ops), options.policy, last_sequence,
-                        size.value());
+  EventLogWriter writer(std::move(file.fd), std::move(ops), options.policy, options.batch_size,
+                        last_sequence, size.value());
   return writer;
 }
 
-Result<AppendResult> EventLogWriter::AppendAndSync(std::span<const std::byte> payload) {
+Status EventLogWriter::CheckWritable(std::uint64_t records) const {
   if (!fd_.valid()) {
     return Error(ErrorKind::kInvalidArgument, "writer is closed");
   }
@@ -121,39 +131,41 @@ Result<AppendResult> EventLogWriter::AppendAndSync(std::span<const std::byte> pa
                      std::to_string(durable_through_) +
                      " is unknown. Close this writer, verify the log, and reopen it.");
   }
-  if (payload.size() > kMaxPayloadBytes) {
-    return Error(ErrorKind::kLimitExceeded, "payload is " + std::to_string(payload.size()) +
-                                                " bytes; the v1 limit is " +
-                                                std::to_string(kMaxPayloadBytes));
-  }
-  if (accepted_through_ == std::numeric_limits<std::uint64_t>::max()) {
+  if (records > std::numeric_limits<std::uint64_t>::max() - accepted_through_) {
     return Error(ErrorKind::kLimitExceeded, "the 64-bit sequence space is exhausted");
   }
+  return Status::Ok();
+}
 
-  const std::uint64_t sequence = accepted_through_ + 1;
-  Status encoded = EncodeRecordInto(encode_buffer_, sequence, payload);
-  if (!encoded.ok()) return encoded.error();
-
+// One write, one sync, then the acknowledgment. Both failure paths are terminal and
+// neither acknowledges anything, which is what makes the batch an all-or-nothing unit.
+Status EventLogWriter::WriteAndSyncBuffer(std::uint64_t last_sequence, std::uint64_t record_count) {
   const std::uint64_t record_offset = file_offset_;
+
+  ++stats_.write_calls;
   Status written = WriteFully(*ops_, fd_.get(), encode_buffer_, record_offset);
   if (!written.ok()) {
-    // Some bytes may have landed. Whatever is on disk is a strict prefix of this record,
-    // so the log now ends in a recoverable incomplete tail. Appending another record
-    // would bury that partial record mid-file and make it unrecoverable, so the writer
-    // stops here. This record is not acknowledged.
+    // Some bytes may have landed. Whatever is on disk is a strict prefix of this write,
+    // so the log now ends in a recoverable incomplete tail -- or, mid-batch, in whole
+    // records that were never acknowledged. Appending past either would bury it
+    // mid-file and make it unrecoverable, so the writer stops here.
     healthy_ = false;
-    return written.error();
+    return written;
   }
 
   file_offset_ = record_offset + encode_buffer_.size();
-  accepted_through_ = sequence;
+  accepted_through_ = last_sequence;
+  stats_.records_accepted += record_count;
+  stats_.bytes_written += encode_buffer_.size();
 
+  ++stats_.sync_calls;
   Status synced = ops_->SyncData(fd_.get());
   if (!synced.ok()) {
     healthy_ = false;
     Error error(ErrorKind::kUnknownDurability,
-                std::string(SyncPrimitiveName()) + " failed after writing sequence " +
-                    std::to_string(sequence) + "; durability from sequence " +
+                std::string(SyncPrimitiveName()) + " failed after writing " +
+                    std::to_string(record_count) + " record(s) through sequence " +
+                    std::to_string(last_sequence) + "; durability from sequence " +
                     std::to_string(durable_through_ + 1) + " onward is unknown (" +
                     synced.error().message() + ")",
                 synced.error().errno_value());
@@ -161,8 +173,86 @@ Result<AppendResult> EventLogWriter::AppendAndSync(std::span<const std::byte> pa
   }
 
   // The only place durable_through_ ever advances.
-  durable_through_ = sequence;
+  durable_through_ = last_sequence;
+  ++stats_.batches;
+  return Status::Ok();
+}
+
+Result<AppendResult> EventLogWriter::AppendAndSync(std::span<const std::byte> payload) {
+  if (policy_ != SyncPolicy::kSyncEach) {
+    return Error(ErrorKind::kUnsupportedPolicy,
+                 "this writer's policy is " + std::string(SyncPolicyName(policy_)) +
+                     "; use AppendBatchAndSync, so the policy on a result always describes "
+                     "how that result was produced (ADR-006)");
+  }
+  Status writable = CheckWritable(1);
+  if (!writable.ok()) return writable.error();
+  if (payload.size() > kMaxPayloadBytes) {
+    return Error(ErrorKind::kLimitExceeded, "payload is " + std::to_string(payload.size()) +
+                                                " bytes; the v1 limit is " +
+                                                std::to_string(kMaxPayloadBytes));
+  }
+
+  const std::uint64_t sequence = accepted_through_ + 1;
+  Status encoded = EncodeRecordInto(encode_buffer_, sequence, payload);
+  if (!encoded.ok()) return encoded.error();
+
+  Status done = WriteAndSyncBuffer(sequence, 1);
+  if (!done.ok()) return done.error();
   return AppendResult{sequence, durable_through_};
+}
+
+Result<BatchAppendResult> EventLogWriter::AppendBatchAndSync(
+    std::span<const std::span<const std::byte>> payloads) {
+  if (policy_ != SyncPolicy::kSyncBatch) {
+    return Error(ErrorKind::kUnsupportedPolicy, "this writer's policy is " +
+                                                    std::string(SyncPolicyName(policy_)) +
+                                                    "; batch appends require sync_batch (ADR-006)");
+  }
+  if (payloads.empty()) {
+    return Error(ErrorKind::kInvalidArgument,
+                 "an empty batch has no acknowledgment boundary; pass at least one record");
+  }
+  if (payloads.size() > batch_size_) {
+    return Error(ErrorKind::kLimitExceeded, "batch of " + std::to_string(payloads.size()) +
+                                                " records exceeds this writer's batch-size of " +
+                                                std::to_string(batch_size_));
+  }
+  Status writable = CheckWritable(payloads.size());
+  if (!writable.ok()) return writable.error();
+
+  // Every payload is bounded, and the encoded total is bounded, BEFORE the batch buffer
+  // is sized from it. kMaxBatchRecords * (kHeaderSize + kMaxPayloadBytes) cannot overflow
+  // a uint64, so the running total is safe to accumulate.
+  std::uint64_t total_bytes = 0;
+  for (std::size_t i = 0; i < payloads.size(); ++i) {
+    if (payloads[i].size() > kMaxPayloadBytes) {
+      return Error(ErrorKind::kLimitExceeded, "record " + std::to_string(i) + " of the batch is " +
+                                                  std::to_string(payloads[i].size()) +
+                                                  " bytes; the v1 limit is " +
+                                                  std::to_string(kMaxPayloadBytes));
+    }
+    total_bytes += static_cast<std::uint64_t>(kHeaderSize) + payloads[i].size();
+  }
+  if (total_bytes > kMaxBatchBytes) {
+    return Error(ErrorKind::kLimitExceeded, "batch encodes to " + std::to_string(total_bytes) +
+                                                " bytes; the limit is " +
+                                                std::to_string(kMaxBatchBytes));
+  }
+
+  const std::uint64_t first_sequence = accepted_through_ + 1;
+  const std::uint64_t last_sequence = accepted_through_ + payloads.size();
+
+  encode_buffer_.clear();
+  encode_buffer_.reserve(static_cast<std::size_t>(total_bytes));
+  for (std::size_t i = 0; i < payloads.size(); ++i) {
+    Status encoded = AppendRecordTo(encode_buffer_, first_sequence + i, payloads[i]);
+    if (!encoded.ok()) return encoded.error();
+  }
+
+  Status done = WriteAndSyncBuffer(last_sequence, payloads.size());
+  if (!done.ok()) return done.error();
+  return BatchAppendResult{first_sequence, last_sequence, payloads.size(), durable_through_};
 }
 
 Status EventLogWriter::Close() {

@@ -78,6 +78,11 @@ void EncodeHeader(std::uint64_t sequence, std::uint16_t flags, std::span<const s
 Status EncodeRecordInto(std::vector<std::byte>& out, std::uint64_t sequence,
                         std::span<const std::byte> payload);
 
+// Appends one complete record to whatever `out` already holds, leaving it untouched on
+// failure. This is how a batch is assembled into a single contiguous write (ADR-006).
+Status AppendRecordTo(std::vector<std::byte>& out, std::uint64_t sequence,
+                      std::span<const std::byte> payload);
+
 Result<std::vector<std::byte>> EncodeRecord(std::uint64_t sequence,
                                             std::span<const std::byte> payload);
 

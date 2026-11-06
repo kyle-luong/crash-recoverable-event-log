@@ -24,8 +24,14 @@ enum class SyncPolicy {
 std::string_view SyncPolicyName(SyncPolicy policy);
 Result<SyncPolicy> ParseSyncPolicy(std::string_view name);
 
+// Upper bounds on one batch, checked before any batch buffer is allocated (ADR-006).
+inline constexpr std::size_t kMaxBatchRecords = 4096;
+inline constexpr std::uint64_t kMaxBatchBytes = 64ull << 20;  // 64 MiB of encoded output
+
 struct WriterOptions {
   SyncPolicy policy = SyncPolicy::kSyncEach;
+  // Under kSyncEach this must be 1. Under kSyncBatch it is the largest batch this writer
+  // will accept, at most kMaxBatchRecords.
   std::size_t batch_size = 1;
   // Required to append to an existing nonempty log. The log must scan clean; a log with
   // an incomplete tail or corruption must go through `recover` first.
@@ -39,6 +45,26 @@ struct AppendResult {
   // Highest sequence known durable. 0 means nothing has been acknowledged yet.
   // Never advances past a successful SyncData (ADR-001).
   std::uint64_t durable_through_sequence = 0;
+};
+
+// One whole-batch acknowledgment. Every sequence in [first_sequence, last_sequence] is
+// durable, or none of them is: a batch is acknowledged as a unit or not at all (ADR-006).
+struct BatchAppendResult {
+  std::uint64_t first_sequence = 0;
+  std::uint64_t last_sequence = 0;
+  std::uint64_t records = 0;
+  std::uint64_t durable_through_sequence = 0;
+};
+
+// Syscall counts for the durability path. These make the batching tradeoff checkable by
+// assertion rather than by timing: sync_batch(32) must perform one write and one sync
+// where sync_each performs thirty-two of each. Measured throughput is milestone M4.
+struct WriterStats {
+  std::uint64_t write_calls = 0;  // WriteFully invocations, not short-write retries
+  std::uint64_t sync_calls = 0;   // successful and failed SyncData calls on data
+  std::uint64_t batches = 0;      // acknowledgment units completed
+  std::uint64_t records_accepted = 0;
+  std::uint64_t bytes_written = 0;
 };
 
 // Single-writer append path for one log file.
@@ -56,14 +82,23 @@ class EventLogWriter {
   EventLogWriter(const EventLogWriter&) = delete;
   EventLogWriter& operator=(const EventLogWriter&) = delete;
 
-  // Appends one record and, under kSyncEach, syncs it before returning. On any failure
-  // no acknowledgment is produced for this record.
+  // Appends one record and syncs it before returning. On any failure no acknowledgment
+  // is produced for this record. Requires policy kSyncEach.
   Result<AppendResult> AppendAndSync(std::span<const std::byte> payload);
+
+  // Appends N records as one contiguous write, then syncs once, then acknowledges the
+  // whole batch (ADR-006). Requires policy kSyncBatch and 1 <= N <= batch_size. On any
+  // failure no record in the batch is acknowledged and the writer becomes terminal;
+  // records already on disk are left for recovery to classify.
+  Result<BatchAppendResult> AppendBatchAndSync(
+      std::span<const std::span<const std::byte>> payloads);
 
   std::uint64_t durable_through_sequence() const { return durable_through_; }
   std::uint64_t accepted_through_sequence() const { return accepted_through_; }
   std::uint64_t file_offset() const { return file_offset_; }
   SyncPolicy policy() const { return policy_; }
+  std::size_t batch_size() const { return batch_size_; }
+  const WriterStats& stats() const { return stats_; }
   // False once a sync has failed: durability from that point on is unknown.
   bool healthy() const { return healthy_; }
 
@@ -71,17 +106,26 @@ class EventLogWriter {
 
  private:
   EventLogWriter(FileDescriptor fd, std::shared_ptr<FileOps> ops, SyncPolicy policy,
-                 std::uint64_t last_sequence, std::uint64_t file_offset)
+                 std::size_t batch_size, std::uint64_t last_sequence, std::uint64_t file_offset)
       : fd_(std::move(fd)),
         ops_(std::move(ops)),
         policy_(policy),
+        batch_size_(batch_size),
         accepted_through_(last_sequence),
         durable_through_(last_sequence),
         file_offset_(file_offset) {}
 
+  // Shared preconditions for both append paths: open, not terminal, sequence space left.
+  Status CheckWritable(std::uint64_t records) const;
+  // Writes `encode_buffer_` and syncs it once, advancing the acknowledgment on success.
+  // `last_sequence` is the highest sequence the buffer contains.
+  Status WriteAndSyncBuffer(std::uint64_t last_sequence, std::uint64_t record_count);
+
   FileDescriptor fd_;
   std::shared_ptr<FileOps> ops_;
   SyncPolicy policy_ = SyncPolicy::kSyncEach;
+  std::size_t batch_size_ = 1;
+  WriterStats stats_;
   std::uint64_t accepted_through_ = 0;
   std::uint64_t durable_through_ = 0;
   std::uint64_t file_offset_ = 0;

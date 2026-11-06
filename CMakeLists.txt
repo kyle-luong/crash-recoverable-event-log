@@ -46,7 +46,7 @@ target_link_libraries(eventlog PRIVATE eventlog_core)
 
 enable_testing()
 
-set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_reader test_recovery)
+set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_batch test_reader test_recovery)
 foreach(suite IN LISTS EVENTLOG_TEST_SUITES)
   add_executable(${suite} tests/${suite}.cpp)
   target_link_libraries(${suite} PRIVATE eventlog_core)

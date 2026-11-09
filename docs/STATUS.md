@@ -2,7 +2,7 @@
 
 Milestone: **M2 complete** | Active task: none; M3 CPP-07 (crash harness) not started
 Branch: `main` (main-first, ADR-005)
-Last known good commit: see `git log -1`
+Last known good commit: `351afe6` (M2), verified by `./scripts/verify-linux.sh`
 Status: M1 and M2 verified on Linux; nothing pushed to `origin`
 
 ## Done
@@ -70,6 +70,25 @@ Every suite builds with `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion 
 -Wold-style-cast` and runs under ASan + UBSan with `-fno-sanitize-recover=all` (LeakSanitizer on
 too, on Linux). The slow sweep cuts a trailing record at every byte offset of a 4096-byte record:
 4119 complete scan/plan/recover/re-verify cycles, all classified identically.
+
+## History
+
+All on `main`; nothing has been pushed to `origin`.
+
+| Commit | Date | Subject |
+|---|---|---|
+| `351afe6` | 2026-11-05 | Add batched writes with whole-batch acknowledgment |
+| `1c22f3b` | 2026-10-29 | Sync a resumed log instead of assuming its durability |
+| `58b209d` | 2026-10-26 | Make Linux the verified platform and adopt main-first |
+| `b6838b9` | 2026-10-19 | Document milestone one results and guarantee boundaries |
+| `d89ed5b` | 2026-10-12 | Add incomplete-tail recovery and the command line interface |
+| `cf74521` | 2026-09-29 | Add durable writer and log scanner with advisory lock |
+
+A clean `git clone` of `main` passes `./scripts/verify-linux.sh` from a cold build directory.
+
+This repository's commit dates are set at the repository owner's instruction rather than being
+incidental records of when the work ran. The history has never been pushed, so no published
+history was rewritten to produce it.
 
 ## Contract review (2026-10-29)
 

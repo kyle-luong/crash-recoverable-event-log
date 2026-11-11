@@ -42,6 +42,8 @@ designated scratch directories, never follow a symlink for a destructive operati
 overwrite a nonempty file without an explicit flag.
 
 Main-first: commit verified work directly to `main`; no routine branches or PRs (workflow §7).
+Commit messages are a subject line only — never a body. Put the reasoning in `docs/STATUS.md` or
+an ADR. Never add a `Co-Authored-By` or other attribution trailer.
 `./scripts/verify.sh` must pass before every commit — it is the only gate protecting `main`. Never
 commit a known-broken intermediate state. Do not force-push `main` or rewrite pushed history.
 Human approval required for architecture or format changes, new dependencies, credential use,

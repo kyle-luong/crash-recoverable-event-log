@@ -230,8 +230,11 @@ Avoid arbitrary test-count or coverage quotas; use acceptance coverage: all docu
   `permissions: contents: read` by default. CI remains the independent check that the commit builds
   and passes on the primary platform in a clean environment.
 - Do not force-push `main` or rewrite pushed history.
-- A commit message carries what a PR body otherwise would: scope, behavior, acceptance IDs, test
-  command and result, known limits, performance evidence if claimed, and any human decisions.
+- **Commit messages are a subject line and nothing else.** No bodies. A subject is under ten
+  words, descriptive, with no conventional-commit prefix and no tool name. Scope, behavior,
+  acceptance IDs, verification results, known limits and decisions belong in `docs/STATUS.md` and
+  the ADRs, where they stay editable and are read on purpose — a commit body is none of those
+  things, and on a rewritten or rebased history it is the first thing to go stale.
 - Do not run privileged network requests or arbitrary untrusted shell scripts in CI; use local
   controlled fixtures and temp dirs.
 - Do not auto-merge/deploy. Ask before the first remote push of a repository.

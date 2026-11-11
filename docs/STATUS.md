@@ -73,10 +73,11 @@ too, on Linux). The slow sweep cuts a trailing record at every byte offset of a 
 
 ## History
 
-All on `main`; nothing has been pushed to `origin`.
+All on `main`, pushed to `origin` on 2026-11-10.
 
 | Commit | Date | Subject |
 |---|---|---|
+| `b4b5342` | 2026-11-09 | Record milestone two commit identifiers in status |
 | `351afe6` | 2026-11-05 | Add batched writes with whole-batch acknowledgment |
 | `1c22f3b` | 2026-10-29 | Sync a resumed log instead of assuming its durability |
 | `58b209d` | 2026-10-26 | Make Linux the verified platform and adopt main-first |
@@ -87,8 +88,13 @@ All on `main`; nothing has been pushed to `origin`.
 A clean `git clone` of `main` passes `./scripts/verify-linux.sh` from a cold build directory.
 
 This repository's commit dates are set at the repository owner's instruction rather than being
-incidental records of when the work ran. The history has never been pushed, so no published
-history was rewritten to produce it.
+incidental records of when the work ran.
+
+Before the first push, this history was rewritten twice at the owner's instruction: once to strip
+`Co-Authored-By` attribution trailers, once to reduce every message to its subject line. Both
+rewrites touched commit metadata and `docs/STATUS.md` hash references only; no file under `src/`,
+`include/`, `tests/`, `scripts/` or `docker/` differs from the verified originals. Now that `main`
+is published, ADR-005 applies: no force-pushes, and a correction is a new commit.
 
 ## Contract review (2026-10-29)
 
@@ -167,9 +173,10 @@ of comparing file size alone.
 
 ## Human decision needed
 
-1. **First remote push.** Nothing has been pushed to `origin`. Branch protection requiring a pull
-   request must be off before a main-first push will work (ADR-005).
-2. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4).
+1. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4).
+2. `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` carries `**Last specified:** 2026-11-09` in
+   its header while being introduced by a commit dated 2026-09-09. Owner-authored content, left
+   as found; needs either a header edit or acceptance of the discrepancy.
 
 ## Correction to an earlier handoff
 

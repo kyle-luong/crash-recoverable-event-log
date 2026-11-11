@@ -1,6 +1,7 @@
 # ADR-005 — Main-first development, no routine branches or pull requests
 
-**Status:** accepted (2026-10-26) · **Affects:** repository workflow, verification discipline
+**Status:** accepted (2026-10-26), corrected 2026-11-10 · **Affects:** repository workflow,
+verification discipline
 · **Supersedes:** the feature-branch and pull-request bullets in
 `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §7
 
@@ -25,11 +26,20 @@ is the only thing protecting `main`, so it is mandatory, not advisory. A known-b
 state is never committed; one larger verified commit is preferred to a sequence that leaves `main`
 red in the middle.
 
-A commit message carries what a PR body would have: scope, behavior, acceptance IDs, the
-verification command and its result, known limits, and any decision needing the owner.
+Commit messages are a subject line and nothing else — no bodies. The detail a PR body would
+have carried (scope, behavior, acceptance IDs, verification results, known limits, decisions
+needing the owner) goes to `docs/STATUS.md` and the ADRs instead.
 
 Short-lived branches remain available for a genuine exception — an experiment likely to be thrown
 away, or a change the owner wants to read before it lands — and fast-forward back into `main`.
+
+## Correction (2026-11-10)
+
+This ADR originally said a commit message "carries what a PR body would have", relocating the
+old §7 pull-request checklist into commit bodies. That was never the repository owner's
+instruction — it was inferred from the PR requirement this ADR deletes, and it contradicted a
+standing preference for short commit messages. Commit bodies are not used at all; the text above
+reflects the corrected rule, and the existing history was rewritten to subject lines only.
 
 ## Consequences
 

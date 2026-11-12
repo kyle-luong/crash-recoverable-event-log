@@ -7,14 +7,23 @@ durable before the process died?*
 This is not a database, a queue, or a distributed log. It is one local file, one writer, a
 checksummed record format, and a recovery path that refuses to guess.
 
-**Status:** milestones M1–M4 complete — record format, `sync_each` and `sync_batch` writers, log
-verification, incomplete-tail recovery, fault injection over the syscall boundary, the process-crash
-harness that kills a writer at instrumented checkpoints and checks the recovered log against
-independently observed acknowledgments, and a Release benchmark comparing the durable policies
-against a non-durable baseline. Measured results, with the environment they came from, are in
-[benchmarks/RESULTS.md](benchmarks/RESULTS.md); every figure in this repository comes from a run
+**Status: feature-complete.** All five milestones in [docs/PLAN.md](docs/PLAN.md) are done and all
+16 acceptance criteria have named test evidence — the record format, the `sync_each` and
+`sync_batch` writers, log verification and incomplete-tail recovery, fault injection over the
+syscall boundary in both directions, the process-crash harness that kills a writer at instrumented
+checkpoints and checks the recovered log against independently observed acknowledgments, and a
+Release benchmark comparing the durable policies against a non-durable baseline.
+
+Verified by `./scripts/verify-linux.sh` on Linux — 10 suites, 290 cases, three phases (fast,
+exhaustive, Release), 0 failures — and independently by GitHub Actions on a clean x86_64 runner.
+Measured performance figures, with the machine that produced them, are in
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md); every number in this repository comes from a run
 recorded there, and a report built with sanitizers or off the supported platform marks itself
 unpublishable rather than looking like a result.
+
+Nothing further is planned. The remaining ideas in PRD §8 — threads, vectored I/O, group commit,
+`mmap`, compaction, replication — are deliberately not built, and should wait for a measurement or
+a real use case to ask for them.
 
 ## Build
 

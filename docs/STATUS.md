@@ -97,6 +97,14 @@ cost there is ASan's startup in each of the 300 forked children, which is why th
 `cli_tests` whenever the CMake option is on, and the case count confirms it (163 with the gate, 160
 without).
 
+**GitHub Actions: success** for the same commit (run 43332148586, 1 m 48 s). It runs the identical
+`verify-full.sh` on `ubuntu-latest` x86_64, so every phase above is confirmed on a second
+architecture in a clean checkout. The container gate is the pinned, authoritative one
+(`debian:bookworm-20250929-slim`); CI is deliberately left on the moving `ubuntu-latest` toolchain,
+where a compiler change surfacing a portability problem is a finding rather than noise. A runner
+migration to Ubuntu 26 is in progress, so a future CI failure may be a toolchain change rather than
+a regression — check the pinned container gate before treating one as a defect.
+
 `./scripts/verify.sh` also passes on macOS 15 / arm64 / Apple clang 17 / APFS. That is a
 convenience check, not evidence (ADR-004).
 
@@ -237,6 +245,29 @@ scope for the MVP: multiple producer threads, vectored I/O, group commit, memory
 loopback-filesystem power-cut simulation, segment files, compaction, replication. None of it should
 be started in response to this file; PRD §8 says to add only in response to a measurement or a real
 use case.
+
+### The one correctness caveat left, with its severity
+
+`ApplyRecovery`'s stale-plan guard compares the file's **size** against the preflight, not its
+contents. The window is real: `PlanRecovery` scans without a lock, and `ApplyRecovery` takes the
+writer lock afterwards. An in-place modification of the same length inside that window would not be
+detected, and the truncation would run against a plan that no longer describes the file.
+
+Why it is a caveat and not a defect to fix in a hurry:
+
+- It needs a **non-cooperating** writer. A cooperating one cannot do it — appending changes the
+  size, and it cannot hold the lock. PRD §3 says explicitly not to claim a guarantee against
+  processes that ignore `flock`, so this is outside the stated contract.
+- The failure mode is not data loss. Truncating to a stale `truncate_to` can only leave a damaged
+  record in place, reported with counts from the stale plan; the next `verify` catches it. It cannot
+  discard an acknowledged record, because `truncate_to` is the end of a prefix that was valid when
+  the plan was made and a same-length edit cannot make that prefix longer.
+- The fix is small and known: re-scan under the lock and compare the plan before truncating, now
+  that `ScanLog` accepts an injected `FileOps`. Roughly a dozen lines plus a test.
+
+It is recorded rather than done because no acceptance criterion asks for it and the trigger is out
+of scope. It is the first thing to pick up if this project is ever extended to tolerate writers that
+do not cooperate.
 
 ## Crash harness notes (2026-11-12)
 
@@ -383,6 +414,36 @@ benchmark run on quiet physical Linux: the committed figures come from a virtual
 up to 4.3× between trials, so they bound an order of magnitude rather than pin a number. Everything
 else in PRD §8 is explicitly out of MVP scope and should wait for a measurement or a real use case
 to ask for it.
+
+## Definition of done, item by item (2026-11-12)
+
+Checked against `docs/PRD.md` §7, with the evidence rather than the traceability table.
+
+| # | Item | State | Evidence |
+|---|---|---|---|
+| 1 | Format v1 specified, stable, tested by fixed vectors and negative cases | met | `test_codec`: three golden byte vectors from an independent implementation, explicit-endianness layout assertions, round-trips at 0/1/128/1 MiB, and eleven rejection cases; `test_crc32c`: canonical check value plus published vectors |
+| 2 | Either durable policy acknowledges only after a successful barrier call | met | `test_writer` `FailedSyncNeverAcknowledges`, `FailedSyncIsTerminalForTheWriter`; `test_batch` `FailedBatchSyncAcknowledgesNoRecordInTheBatch`; `durable_through_` advances in exactly one place in `writer.cpp` |
+| 3 | Crash harness demonstrates the acknowledged-prefix invariant, including the after-sync-before-ack ambiguity | met | `crash-test` runs that checkpoint by name, 50 times in the 300-scenario gate; `cli_tests` requires a nonzero extra-unacknowledged count there and zero at `after_ack` |
+| 4 | Corrupt complete records rejected; tail recovery only on explicit instruction | met | `test_recovery` `CorruptFinalRecordIsHardCorruption`, `CorruptFinalHeaderIsHardCorruptionNotATail`, `CorruptMiddleRecordStopsWithAnExplicitLocation`; `cli_tests` file-hash checks before and after `verify` and a flagless `recover` |
+| 5 | CI and sanitizer tests pass; no race-prone concurrency added for its own sake | met | three-phase Linux run above, plus GitHub Actions on a clean x86_64 runner; `grep` for `std::thread`, `std::mutex`, `std::atomic`, `pthread_`, `condition_variable` across `src/` and `include/` returns nothing — the project is single-threaded by construction |
+| 6 | Release benchmark compares policies with recorded environment, raw metrics, honest interpretation | met | `benchmarks/RESULTS.md` and three committed `results-*.json`, each carrying its own environment block and `publishable` flag; the interpretation leads with a 4.3× trial spread and refuses to pin a multiplier |
+| 7 | README has concrete commands, limitations, and real sample output clearly labelled | met | every documented command re-run on Linux Release and diffed against the file; one defect found and fixed (a dropped output line) |
+| 8 | Independent review of format/acknowledgment correctness, integer and bounds handling, and crash-harness assumptions; human merges | **not met** | see below |
+
+**Item 8 is the one gap, and more work by me cannot close it.** Every review in this repository has
+been mine, including the final one. Self-review has found real defects — an overstated latency ratio,
+a sub-microsecond figure rounding to `0 µs`, a test that asserted its own build type, a 39×
+sanitizer regression — so it is not worthless. But it cannot find the class of error where a
+specification has been misread consistently, because the same misreading writes the code and the
+test that confirms it. `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §0 names a fresh-context
+model or Codex for exactly this. The highest-value targets, in order: the acknowledgment boundary in
+`writer.cpp` against PRD §3, the classification boundary in `reader.cpp` against PRD §4's result
+classes, and the crash supervisor's assumption that a parked child plus `SIGKILL` models a process
+crash faithfully (ADR-007).
+
+Item 8's second clause, "human merges", predates the move to main-first (ADR-005), which replaced
+merging with human approval of consequential changes. The clause has not been reinterpreted here; it
+is recorded as superseded by that ADR rather than as satisfied.
 
 ## For the owner — acted on, not asked
 

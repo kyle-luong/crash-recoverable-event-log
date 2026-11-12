@@ -3,7 +3,7 @@
 **Status:** Implementation-ready specification (not implemented)  
 **Applies to:** Process & File Activity Inspector (C); HTTP Fault Injection & Testing Framework (Go); Crash-Safe Event Log & Performance Benchmark (C++)  
 **Owner:** Solo developer  
-**Last specified:** 2026-11-09  
+**Last specified:** 2026-11-12  
 **Authority:** Each project's PRD defines product behavior; this file defines how code is planned, developed, checked, reviewed, and merged.
 
 ## 0. Outcome and operating principles
@@ -22,7 +22,7 @@ Requirement labels:
 
 ### Minimum viable setup
 
-Use **ChatGPT** to refine PRDs and architectural tradeoffs; **Claude Code** (existing subscription) as the main planner/implementer; **local deterministic test commands** as verifier; **fresh-context Claude or Codex** as independent reviewer on substantial patches; **GitHub** for commits, PRs, CI, and manual merge. Use one coding session and one active feature branch by default. No custom orchestration server, job queue, background task daemon, or extra subscription is required.
+Use **ChatGPT** to refine PRDs and architectural tradeoffs; **Claude Code** (existing subscription) as the main planner/implementer; **local deterministic test commands** as verifier; **fresh-context Claude or Codex** as independent reviewer on substantial patches; **GitHub** for commits and CI. Use one coding session on `main` by default; see §7 for the main-first Git policy. No custom orchestration server, job queue, background task daemon, or extra subscription is required.
 
 A compact lifecycle:
 
@@ -35,7 +35,7 @@ Implement + add tests → run verification → fix (bounded attempts)
         ↓
 Fresh-context review (substantial change) → repair + reverify
         ↓
-Commit → GitHub PR + evidence → human review → manual merge
+Verify → commit to main → CI confirms the commit in a clean environment
         ↓
 Update STATUS + capture any reusable lesson
 ```
@@ -45,12 +45,12 @@ Update STATUS + capture any reusable lesson
 | Component                     | Default responsibility                                                                | Use condition                                                                         |
 | ----------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | ChatGPT Plus                  | PRD development; threat/failure-model discussion; milestone prioritization            | During planning or after design blockers; use included access first                   |
-| Claude Code                   | Repository investigation, task plan, code, test, debug, docs, commits, PR preparation | Default main agent; use existing subscription allowance                               |
+| Claude Code                   | Repository investigation, task plan, code, test, debug, docs, verified commits        | Default main agent; use existing subscription allowance                               |
 | Claude Code Plan Mode         | Inspect and propose architecture before changes                                       | Tasks touching public interfaces, persistent data, concurrency, safety, or >3 modules |
 | Local tests/scripts           | Mechanical evidence that acceptance criteria hold                                     | Every significant code change; never replace with AI assertions                       |
 | Fresh Claude session/subagent | Narrow investigation or independent, evidence-based code review                       | Nontrivial diff, cross-cutting behavior, or uncertainty about correctness             |
 | Codex (if accessible)         | Cross-model independent review of difficult C/C++/Go changes                          | Optional; use when its independent review justifies time/cost                         |
-| GitHub Actions                | Clean-room build/test verification on PR and main                                     | Mandatory after the first working milestone                                           |
+| GitHub Actions                | Clean-room build/test verification on each commit to main                             | Mandatory after the first working milestone                                           |
 | Git worktrees                 | Isolate genuinely independent parallel tasks                                          | Only if two non-overlapping tasks can be tested and integrated separately             |
 | OpenRouter + OpenCode         | Alternative model execution after comparing real task outcomes and costs              | **Do not enable by default**                                                          |
 
@@ -89,15 +89,15 @@ Avoid creating more folders until they contain real code. For Go, prefer idiomat
 Read docs/PRD.md and docs/STATUS.md before changing code.
 Inspect existing code and tests before planning work.
 Keep each change within the active task's acceptance criteria and non-goals.
-Run ./scripts/verify.sh; use ./scripts/verify-full.sh before significant PRs.
+Run ./scripts/verify.sh; use ./scripts/verify-full.sh before milestone commits.
 Never weaken/remove tests or change acceptance criteria solely to get a pass.
 Treat filesystem paths, networks, process execution, and crash injection as dangerous:
 use only designated local fixtures and scratch directories by default.
-Keep main untouched; work on a task branch; do not force-push or merge.
+Commit verified work to main; do not force-push or rewrite pushed history.
 Human approval required for architecture/format changes, new dependencies,
 credential use, remote/destructive operations, and scope expansion.
 Before handoff, update docs/STATUS.md with changes, exact verification,
-failures, next step, and commit/branch identifiers.
+failures, next step, and commit identifiers.
 ```
 
 ### `docs/STATUS.md`: minimal resumable handoff
@@ -169,9 +169,9 @@ Acceptance evidence:
   Open decisions: [none or explicit human decision needed]
 ```
 
-**Traceability:** Substantial feature changes **MUST** identify the relevant PRD acceptance IDs and their verifying test(s) in the task file or PR. Keep this as a short mapping, not a duplicate project-wide spreadsheet. Reviewers must challenge the tests' ability to prove the requirement—not just check that a test exists.
+**Traceability:** Substantial feature changes **MUST** identify the relevant PRD acceptance IDs and their verifying test(s) in the task file or `docs/STATUS.md`. Keep this as a short mapping, not a duplicate project-wide spreadsheet. Reviewers must challenge the tests' ability to prove the requirement—not just check that a test exists.
 
-**Changing specifications:** If implementation reveals a necessary requirement or guarantee change, stop work on the affected behavior. Describe the existing contract, proposed revision, reason, affected acceptance tests, and compatibility risks. Obtain human approval for material semantic/scope changes; update the PRD/feature spec, then the tests, then resume implementation. Never silently relax requirements or tests to match generated code. Small clarifications that preserve behavior can be edited directly with a short note in the task or PR.
+**Changing specifications:** If implementation reveals a necessary requirement or guarantee change, stop work on the affected behavior. Describe the existing contract, proposed revision, reason, affected acceptance tests, and compatibility risks. Obtain human approval for material semantic/scope changes; update the PRD/feature spec, then the tests, then resume implementation. Never silently relax requirements or tests to match generated code. Small clarifications that preserve behavior can be edited directly with a short note in the task or `docs/STATUS.md`.
 
 **Maximum task size:** aim for one independently reviewable change that takes a human less than ~15 minutes to assess. If a task will likely exceed ~2 days or touch many unrelated areas, split it by independently testable behavior. Do not split one correctness invariant across competing agents unless integration ownership is unambiguous.
 
@@ -184,12 +184,12 @@ Acceptance evidence:
 1. **Specify and validate:** Select one task ID; check observable requirements, pre/postconditions, invariants, failure cases, non-goals, and acceptance evidence. Mark `spec-ready` or stop on contradictions. Never implement an unapproved broad idea.
 2. **Inspect:** Read current source, tests, build system, and interfaces. Report any contradiction with the PRD before editing.
 3. **Plan:** Propose touched files, data/control flow, expected failures, verification commands, and rollback. Obtain approval for schema/protocol/architecture changes or dependency additions; routine choices need no approval.
-4. **Implement:** Work on a feature branch. Write the minimal change and tests. Avoid speculative helper layers, service abstractions, frameworks, or extra features.
-5. **Verify:** Run formatter/linter, compile, unit tests, key integrations and fault tests. The same `verify.sh` should run locally and in CI. Run full verification at milestones/PRs.
+4. **Implement:** Write the minimal change and tests. Avoid speculative helper layers, service abstractions, frameworks, or extra features.
+5. **Verify:** Run formatter/linter, compile, unit tests, key integrations and fault tests. The same `verify.sh` should run locally and in CI. Run full verification at milestones.
 6. **Repair:** Investigate the failing assumption, fix root cause, rerun checks. Maximum **two autonomous repair cycles per distinct persistent failure**; if still failing, report evidence and escalate rather than looping or deleting tests.
 7. **Review:** For substantial changes, obtain a fresh-context review with only the task contract, PRD section, diff, and test evidence. Reviewer reports _actionable defects_ with file/line, impact, and reproduction—not stylistic preferences.
 8. **Reverify:** Apply substantive findings and rerun appropriate checks. A review does not replace deterministic verification.
-9. **Deliver:** Commit logically, open a PR with concise summary, exact tests run, risks/limits, and links to benchmark artifacts when relevant. User merges manually after CI passes.
+9. **Deliver:** Commit logically to `main` once verification passes. Record the summary, exact tests run, risks/limits, and any benchmark artifacts in `docs/STATUS.md`, not in the commit message (§7).
 10. **Learn:** Update `STATUS`, and if a real failure reveals a recurring issue, improve a specific test or short instruction. Avoid accumulating generic advice.
 
 **Stop/escalate immediately** if: the PRD is contradictory, a test would require live external destructive calls, production credentials are needed, the action touches data outside sandbox/workspace, repeated repairs regress other tests, a critical invariant cannot be explained, or performance claims cannot be reproduced.
@@ -208,9 +208,9 @@ Codex is optional for second opinions and not required for every small patch. If
 | ----------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------- |
 | Every edit batch        | Format, compile, targeted unit test                                             | Fast feedback; agent repairs autonomously           |
 | Every task completion   | `./scripts/verify.sh`; key negative test                                        | No unchecked task completion                        |
-| Before significant PR   | `./scripts/verify-full.sh`; sanitizers/race/fault integration                   | May take longer; results recorded                   |
+| Before milestone commit | `./scripts/verify-full.sh`; sanitizers/race/fault integration                   | May take longer; results recorded                   |
 | Before claiming speedup | Dedicated release benchmark vs baseline, fixed environment, multiple runs       | Never measure sanitizer builds as normal throughput |
-| In PR CI                | Clean checkout, build, fast tests, static checks; race/sanitizer as appropriate | `GITHUB_TOKEN` read-only; no secret-dependent tests |
+| In CI                   | Clean checkout, build, fast tests, static checks; race/sanitizer as appropriate | `GITHUB_TOKEN` read-only; no secret-dependent tests |
 
 **C:** compiler warnings (`-Wall -Wextra -Wpedantic -Werror` where practical), `clang-format`, AddressSanitizer/UBSan, integration tests that run actual child processes. **Go:** `gofmt`, `go vet ./...`, `go test ./...`, `go test -race ./...`, timeouts and resource cleanup. **C++:** CMake Debug+ASan/UBSan, warnings, unit/recovery tests, separate Release benchmark; use RAII, explicit ownership, no unnecessary hand-written allocators.
 
@@ -302,7 +302,7 @@ Each adoption experiment should compare task completion time, verified defects, 
 
 ## 10. Metrics for workflow health
 
-Record a short line per completed PR in `docs/STATUS.md` or a lightweight `docs/WORKLOG.tsv` once there are enough tasks:
+Record a short line per completed task in `docs/STATUS.md` or a lightweight `docs/WORKLOG.tsv` once there are enough tasks:
 
 ```
 TaskID | start/end | accepted? | human_minutes | repair_cycles | CI_failures | escaped_defects | optional_cost_usd
@@ -340,9 +340,9 @@ Review after 5–10 tasks. The aim is **verified work per hour of human attentio
 
 > Review this diff independently against TASK-ID and relevant PRD requirements. Check both specification coverage (requirements-to-tests) and implementation correctness, including untested edge cases. Report only concrete correctness/security/resource/concurrency/performance defects or missing critical tests, with file location, impact, and a reproduction path. Do not edit code. Distinguish verified issues from hypotheses.
 
-**Before PR**
+**Before a milestone commit**
 
-> Re-run required verification; show its exact results. Prepare a reviewable PR summary with acceptance IDs, design decisions, limitations, benchmark methodology, and relevant test evidence. Do not merge or deploy; ask for human approval for consequential changes.
+> Re-run required verification; show its exact results. Record acceptance IDs, design decisions, limitations, benchmark methodology, and relevant test evidence in `docs/STATUS.md`. Do not push or deploy; ask for human approval for consequential changes.
 
 **Fresh-session recovery**
 

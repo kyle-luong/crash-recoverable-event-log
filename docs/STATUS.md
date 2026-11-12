@@ -1,9 +1,10 @@
 # Current state
 
-Milestone: **M4 complete** | Active task: none; M5 CPP-09 (harden and release) not started
+Milestone: **M5 complete — every PRD milestone is done** | Active task: none
 Branch: `main` (main-first, ADR-005)
-Last known good commit: `e8437ae` (M4), verified by `./scripts/verify-linux.sh`
-Status: M1 through M4 verified on Linux and pushed to `origin`
+Last known good commit: `fa7fa70` (M5), verified by `./scripts/verify-linux.sh`
+Status: M1 through M5 verified on Linux and pushed to `origin`. All 16 acceptance criteria in
+`docs/PLAN.md` have named evidence; none is listed as uncovered.
 
 ## Done
 
@@ -61,6 +62,14 @@ durability field at all, calls the barrier nowhere — not per record and not wh
 existing log — and leaves `durable_through_sequence()` at 0 for the writer's life. The crash harness
 rejects it, so it cannot enter the acknowledged-prefix claim.
 
+Hardening (M5): the read path now goes through the injectable `FileOps` boundary, so an I/O error
+while reading is provably reported as an I/O error and never as a verdict about the log's contents.
+A log must be a regular file, checked on the descriptor rather than the path, with `O_NONBLOCK` on
+every open so a named pipe is refused instead of blocking for a peer that never arrives. Both
+commands that write a report — `verify --json` and `bench --out` — refuse a symlink and refuse to
+replace existing content without `--overwrite`, checked before the command does any work so a
+refusal can never be mistaken for a verdict.
+
 CLI: `append` (with `--policy sync_batch --batch-size N` or `--policy write_only`), `verify`,
 `recover`, `crash-test`, `bench`, with the PRD's exit codes and `verify --json`.
 
@@ -73,9 +82,20 @@ non-durable result plus the benchmark's honesty rules (ADR-008).
 ## Evidence
 
 `./scripts/verify-linux.sh` **PASS** on 2026-11-12 — Linux 6.10.14 aarch64 (Debian 12 container),
-GCC 12.2.0, ext4, clang-format 14.0.6. All three phases: fast suite, exhaustive sweep
-(`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 10 of 10 suites, 0 failures in each
-phase. The slow phase is dominated by `cli_tests`, almost all of it the 300-scenario crash gate.
+GCC 12.2.0, ext4, clang-format 14.0.6 over 38 files. 10 of 10 suites and 0 failures in each of the
+three phases:
+
+| Phase | Build | Total | Slowest two |
+|---|---|---:|---|
+| 1 fast | Debug, ASan+UBSan | 57.9 s | `cli_tests` 57.9 s, `test_reader` 3.6 s |
+| 2 exhaustive (`EVENTLOG_SLOW_TESTS=ON`) | Debug, ASan+UBSan | 99.2 s | `cli_tests` 85.6 s, `test_recovery` 7.6 s |
+| 3 Release | Release, no sanitizers | 6.3 s | `test_recovery` 3.7 s, `cli_tests` 1.5 s |
+
+`cli_tests` dominates the first two phases and is almost entirely the 300-scenario crash gate; its
+cost there is ASan's startup in each of the 300 forked children, which is why the same gate takes
+1.5 s in Release. The gate does run in all three phases — `ctest` sets `EVENTLOG_SLOW_TESTS=1` for
+`cli_tests` whenever the CMake option is on, and the case count confirms it (163 with the gate, 160
+without).
 
 `./scripts/verify.sh` also passes on macOS 15 / arm64 / Apple clang 17 / APFS. That is a
 convenience check, not evidence (ADR-004).
@@ -87,12 +107,12 @@ convenience check, not evidence (ADR-004).
 | `test_codec` | 18 |
 | `test_writer` | 21 |
 | `test_batch` | 12 |
-| `test_reader` | 8 |
+| `test_reader` | 15 |
 | `test_recovery` | 17 |
 | `test_crash` | 15 |
 | `test_bench` | 15 |
-| `cli_tests` | 149 |
-| **total** | **269** |
+| `cli_tests` | 163 |
+| **total** | **290** |
 
 The M3 acceptance gate from `docs/PLAN.md` runs inside `cli_tests` under `EVENTLOG_SLOW_TESTS`:
 `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0 with 300 scenarios, 0
@@ -101,17 +121,21 @@ records recovered that were never acknowledged. The same seed produces the same 
 on macOS, which is what makes a failing run reproducible.
 
 Every suite builds with `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-conversion
--Wold-style-cast` and runs under ASan + UBSan with `-fno-sanitize-recover=all` (LeakSanitizer on
-too, on Linux). The slow sweep cuts a trailing record at every byte offset of a 4096-byte record:
+-Wold-style-cast` and runs under ASan + UBSan with `-fno-sanitize-recover=all`, plus
+`strict_string_checks`, `_GLIBCXX_ASSERTIONS` for bounds-checked containers, and LeakSanitizer on
+Linux. `detect_stack_use_after_return` is deliberately not on by default; the measurement behind
+that is below. The slow sweep cuts a trailing record at every byte offset of a 4096-byte record:
 4119 complete scan/plan/recover/re-verify cycles, all classified identically. The crash harness adds
 250 real process kills per acceptance run.
 
 ## History
 
-All on `main`. M1 and M2 were pushed to `origin` on 2026-11-10; M3 and M4 on 2026-11-12.
+All on `main`. M1 and M2 were pushed to `origin` on 2026-11-10; M3, M4 and M5 on 2026-11-12.
 
 | Commit | Date | Subject |
 |---|---|---|
+| `fa7fa70` | 2026-11-12 | Harden the read path and guard every report file |
+| `5c226a5` | 2026-11-12 | Record milestone four results and measured benchmarks |
 | `e8437ae` | 2026-11-12 | Add the release benchmark and the write_only baseline |
 | `59a653c` | 2026-11-12 | Record milestone three results and verification |
 | `6e4cae4` | 2026-11-12 | Add the crash supervisor and acknowledged-prefix oracle |
@@ -208,10 +232,11 @@ reported, all now fixed:
 
 ## Not done
 
-- Harden and release (M5, CPP-09): the full sanitizer sweep against every command added since M1,
-  the remaining CLI bounds and destructive-operation guards, and a README review against PRD §5.
-- Read-path fault injection. `ScanLog` still constructs `PosixFileOps` directly, so an I/O error
-  while reading is not injectable.
+Nothing in the PRD's milestone plan. What remains is the list in PRD §8, which is explicitly out of
+scope for the MVP: multiple producer threads, vectored I/O, group commit, memory-mapped reading,
+loopback-filesystem power-cut simulation, segment files, compaction, replication. None of it should
+be started in response to this file; PRD §8 says to add only in response to a measurement or a real
+use case.
 
 ## Crash harness notes (2026-11-12)
 
@@ -290,6 +315,25 @@ are covered everywhere. The `cli_tests.sh` equivalent now asserts that the table
 about publishability rather than asserting which answer they give. That is a better test than what
 it replaced: the original could only ever have checked one row.
 
+**A regression I introduced and then measured out.** M5 first added
+`detect_stack_use_after_return=1` to the sanitizer options alongside `strict_string_checks` and
+`_GLIBCXX_ASSERTIONS`. The Linux gate failed: the exhaustive recovery sweep timed out after 300 s,
+having taken 5.48 s before. The ratios were the clue — `cli_tests` slowed only 1.7× because it is
+dominated by `fsync` wall time, while the sweep slowed more than 55×.
+
+Measured on Linux rather than guessed: the sweep takes **10.7 s without that one option and over
+420 s with it**, a factor of more than 39. In a Debug build nothing inlines, so every call allocates
+an ASan fake stack frame, and `ExerciseEveryTailCut(4096, 2)` performs on the order of 34 million
+trivial container operations across its 4119 iterations.
+
+It is now off by default, with the measurement and the re-enable command recorded in
+`scripts/sanitizer-env.sh`. Two things worth being clear about. This is not a weakened gate:
+CPP-AC14 asks for ASan/UBSan, which is satisfied, and the dropped option was an M5 addition of mine
+rather than part of any criterion — the bug class it adds is a returned reference to a local, and
+this code returns `Result<T>` by value throughout. And the timeout was left at 300 s on purpose: it
+exists to catch a hang, not to enforce a performance budget, so raising it would have hidden the
+regression instead of removing it.
+
 **One Linux-only defect, caught by the gate.** `struct ::utsname info{}` and `struct ::rusage
 usage{}` formatted differently under clang-format 14 (Debian, the supported platform) than under 17
 (Apple), which Apple clang's local run could not see. Fixed with the same local-alias pattern
@@ -297,15 +341,48 @@ usage{}` formatted differently under clang-format 14 (Debian, the supported plat
 one. That makes four defects the Linux gate has caught that macOS never reported, which is the
 argument for ADR-004 restated in practice.
 
+## Hardening notes (2026-11-12)
+
+No ADR: none of this decided anything the PRD had left open. It closed gaps.
+
+**An I/O error is not a verdict about the log.** `ScanLog` answers "what shape is this log" and
+reserved Errors for "I could not find out" — but the read path constructed `PosixFileOps` directly,
+so that distinction had no test. It was the one deferred item that mattered, because confusing the
+two is the worst wrong answer this tool can give: a failing disk reported as corrupt data sends
+someone to the wrong problem, and a user told their log is damaged may throw it away. `FileOps`
+gained a `ReadAt`, `ScanLog` and `LogReader::Open` take an optional one, and five cases in
+`test_reader` now pin the behaviour — a failed first read, a failed read after a valid header is
+already decoded, a failure partway through a multi-record scan, short reads being looped over rather
+than mistaken for end of file, and `LogReader::Next` surfacing the same error.
+
+**A log must be a regular file.** The format is read with `pread(2)`, sized with `fstat(2)` and
+shortened with `ftruncate(2)`; none of those mean anything on a directory, a device or a pipe, so
+this is a correctness requirement rather than a policy. Checked on the descriptor, so nothing can be
+swapped in between the check and the open. `O_NONBLOCK` is on every log open for one reason: opening
+a named pipe for writing would otherwise block until a reader appeared, so the tool would hang on a
+path it should refuse. The flag has no effect on a regular file, which is the only thing that gets
+past the check.
+
+**The README was verified, not reviewed.** Every documented command was re-run on Linux Release and
+its output diffed against the file. All of it matched except one thing: the `sync_each` append
+example had silently dropped its third output line (`Acknowledgments: 1000  Barrier calls: 1000
+Write calls: 1000`) while claiming to be real output. Fixed, and the claim is now explicit about
+which blocks are measured and that nothing is illustrative. Two stale descriptions went with it: the
+layout section listed seven headers when there are fourteen, and the line "file_ops.cpp is the only
+POSIX boundary" had stopped being true once the crash harness started calling `fork`/`exec`/`kill`
+and the benchmark started reading the environment. That sentence is now specific about what goes
+through `FileOps` and what does not.
+
 ## Next action
 
-M5 CPP-09: harden and release. The remaining work named by `docs/PLAN.md` is the full sanitizer
-sweep over the commands added since M1, the CLI bounds and destructive-operation guards for
-`crash-test` and `bench` (both already refuse symlinks and nonempty overwrites, so this is a review
-rather than a build), and a README review against PRD §5 for CPP-AC16.
+None. Every milestone in `docs/PLAN.md` is `done` and all 16 acceptance criteria have named
+evidence.
 
-One concrete item worth doing there: route `ScanLog` through the injected `FileOps` so a read-path
-I/O error becomes testable. It has been deferred twice now because no milestone needed it.
+If this repository is picked up again, the useful next step is **not** a feature. It is a second
+benchmark run on quiet physical Linux: the committed figures come from a virtual machine and vary by
+up to 4.3× between trials, so they bound an order of magnitude rather than pin a number. Everything
+else in PRD §8 is explicitly out of MVP scope and should wait for a measurement or a real use case
+to ask for it.
 
 ## For the owner — acted on, not asked
 

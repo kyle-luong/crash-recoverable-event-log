@@ -1,9 +1,9 @@
 # Current state
 
-Milestone: **M3 complete** | Active task: none; M4 CPP-08 (benchmark) not started
+Milestone: **M4 complete** | Active task: none; M5 CPP-09 (harden and release) not started
 Branch: `main` (main-first, ADR-005)
-Last known good commit: `6e4cae4` (M3), verified by `./scripts/verify-linux.sh`
-Status: M1 through M3 verified on Linux and pushed to `origin`
+Last known good commit: `e8437ae` (M4), verified by `./scripts/verify-linux.sh`
+Status: M1 through M4 verified on Linux and pushed to `origin`
 
 ## Done
 
@@ -34,7 +34,8 @@ or sync acknowledges no record in the batch and is terminal. Batch bounds (`batc
 `WriterStats` counts write calls, barrier calls, acknowledgment units, records and bytes, so the
 batching tradeoff is checked by assertion instead of prose: `sync_batch(32)` performs one write and
 one barrier call where `sync_each` performs 32 of each, and both produce byte-identical files.
-These are counts, not timings. **No throughput or latency number is measured or claimed.**
+These are counts, not timings. Timings are measured separately by `bench` and recorded with their
+environment in `benchmarks/RESULTS.md`; no test asserts a duration.
 
 Crash harness (M3): `eventlog crash-test` spawns a writer as a child process, stops it with
 `SIGKILL` at one of six instrumented checkpoints, recovers the log, and checks it against the
@@ -46,21 +47,35 @@ acknowledged are permitted and counted. Recovered records are read back and comp
 against the deterministic payload for their sequence, so a structurally perfect record that is not
 the one that was written is caught. Hard corruption is a violation, never truncated.
 
-CLI: `append` (now with `--policy sync_batch --batch-size N`), `verify`, `recover`, `crash-test`,
-with the PRD's exit codes and `verify --json`.
+Benchmark (M4): `eventlog bench` compares `sync_each`, `sync_batch(16)`, `sync_batch(64)` and
+`write_only` on one workload over N trials with a fresh file each time, and writes a JSON report
+carrying its full environment and units. It reports median and range, never the best run;
+percentiles are nearest-rank, so every figure is a latency that occurred; and it fails rather than
+report a run whose policies did not write identical bytes or whose barrier calls did not match its
+acknowledgment granularity. Every report stamps `publishable`, true only for a Release build with
+sanitizers off on Linux, and the table prints the disqualification as a banner above the numbers
+(ADR-008).
 
-Seven ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier
+`write_only` (M4): accepted, never durable. It has its own method returning a type with no
+durability field at all, calls the barrier nowhere — not per record and not when resuming an
+existing log — and leaves `durable_through_sequence()` at 0 for the writer's life. The crash harness
+rejects it, so it cannot enter the acknowledged-prefix claim.
+
+CLI: `append` (with `--policy sync_batch --batch-size N` or `--policy write_only`), `verify`,
+`recover`, `crash-test`, `bench`, with the PRD's exit codes and `verify --json`.
+
+Eight ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier
 (ADR-001), the recovery classification boundary (ADR-002), terminal sync failure (ADR-003), Linux as
 the supported platform (ADR-004), main-first development (ADR-005), the batch acknowledgment
-boundary (ADR-006), and the crash supervisor's kill protocol and oracle (ADR-007).
+boundary (ADR-006), the crash supervisor's kill protocol and oracle (ADR-007), and the shape of a
+non-durable result plus the benchmark's honesty rules (ADR-008).
 
 ## Evidence
 
 `./scripts/verify-linux.sh` **PASS** on 2026-11-12 — Linux 6.10.14 aarch64 (Debian 12 container),
-GCC 12.2.0, ext4, clang-format 14.0.6, format check over 32 files. All three phases: fast suite,
-exhaustive sweep (`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 9 of 9 suites, 0
-failures in each phase. Total ctest time 111 s in the slow phase, of which `cli_tests` is 101 s —
-almost entirely the 300-scenario crash gate.
+GCC 12.2.0, ext4, clang-format 14.0.6. All three phases: fast suite, exhaustive sweep
+(`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 10 of 10 suites, 0 failures in each
+phase. The slow phase is dominated by `cli_tests`, almost all of it the 300-scenario crash gate.
 
 `./scripts/verify.sh` also passes on macOS 15 / arm64 / Apple clang 17 / APFS. That is a
 convenience check, not evidence (ADR-004).
@@ -70,13 +85,14 @@ convenience check, not evidence (ADR-004).
 | `test_scaffold` | 8 |
 | `test_crc32c` | 6 |
 | `test_codec` | 18 |
-| `test_writer` | 18 |
+| `test_writer` | 21 |
 | `test_batch` | 12 |
 | `test_reader` | 8 |
 | `test_recovery` | 17 |
 | `test_crash` | 15 |
-| `cli_tests` | 125 |
-| **total** | **227** |
+| `test_bench` | 15 |
+| `cli_tests` | 149 |
+| **total** | **269** |
 
 The M3 acceptance gate from `docs/PLAN.md` runs inside `cli_tests` under `EVENTLOG_SLOW_TESTS`:
 `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0 with 300 scenarios, 0
@@ -92,10 +108,12 @@ too, on Linux). The slow sweep cuts a trailing record at every byte offset of a 
 
 ## History
 
-All on `main`. M1 and M2 were pushed to `origin` on 2026-11-10; M3 on 2026-11-12.
+All on `main`. M1 and M2 were pushed to `origin` on 2026-11-10; M3 and M4 on 2026-11-12.
 
 | Commit | Date | Subject |
 |---|---|---|
+| `e8437ae` | 2026-11-12 | Add the release benchmark and the write_only baseline |
+| `59a653c` | 2026-11-12 | Record milestone three results and verification |
 | `6e4cae4` | 2026-11-12 | Add the crash supervisor and acknowledged-prefix oracle |
 | `c3e7717` | 2026-11-12 | Correct the workflow document's stale pull-request flow |
 | `fe7bdb2` | 2026-11-10 | Drop commit bodies and record the subject-only rule |
@@ -142,8 +160,8 @@ substantive defect, now fixed; four observations recorded rather than changed.
 `durable_through_sequence` to the last sequence found by scanning an existing log. A scan reads
 through the page cache, so it proves only that those records are present and structurally complete,
 never that any of them reached the durability barrier. A writer killed between `write(2)` and its
-sync leaves a log that scans identically to a fully synced one, and `write_only` (M4) will produce
-that state by design. `Open` now issues one `SyncData` before reporting the resumed prefix as
+sync leaves a log that scans identically to a fully synced one, and `write_only` produces that
+state by design. `Open` now issues one `SyncData` before reporting the resumed prefix as
 durable, and fails with `kUnknownDurability` if that call fails. Three tests pin it:
 `ResumeSyncsTheExistingPrefix`, `ResumeFailsOpenWhenTheSyncFails`, `FreshLogDoesNotSyncDataAtOpen`.
 
@@ -167,8 +185,9 @@ Known limits, unchanged:
   preflight scan, which is the window; a re-scan under the lock would close it.
 - `WriteFully` and `ReadAt` retry `EINTR` without a bound, as PRD §3 specifies. Unbounded in
   principle; `EINTR` does not occur for regular-file I/O in practice.
-- Scanning uses two `pread` calls per record. Correct, and fine at current sizes, but it should be
-  measured before the M4 benchmark quotes any verification throughput.
+- Scanning uses two `pread` calls per record. Correct, and fine at current sizes. The M4 benchmark
+  measures the append path only, so no verification-throughput figure exists to be wrong; one would
+  need measuring before it could be quoted.
 
 ## Platform and workflow change (2026-10-26)
 
@@ -189,11 +208,10 @@ reported, all now fixed:
 
 ## Not done
 
-- Benchmarks (M4, CPP-08). No throughput or latency number is claimed anywhere in this repository.
-  The crash harness reports counts of scenarios, kills and records, never timings.
-- Harden and release (M5, CPP-09).
-- `write_only` policy. Rejected at `Open`, and rejected by the crash-test scenario parser, so no
-  path can report it as durable or fold it into the acknowledged-prefix claim.
+- Harden and release (M5, CPP-09): the full sanitizer sweep against every command added since M1,
+  the remaining CLI bounds and destructive-operation guards, and a README review against PRD §5.
+- Read-path fault injection. `ScanLog` still constructs `PosixFileOps` directly, so an I/O error
+  while reading is not injectable.
 
 ## Crash harness notes (2026-11-12)
 
@@ -230,22 +248,83 @@ Known limits, recorded rather than fixed:
 - `ApplyRecovery`'s stale-plan guard still compares file size only. The harness reaps the child
   before recovering, so nothing can modify the file inside that window here.
 
+## Benchmark notes (2026-11-12)
+
+Design decisions are in ADR-008. The measured results, with the environment they came from, are in
+`benchmarks/RESULTS.md`, and the raw reports are committed beside it. What matters for the next
+person:
+
+**The spread is the headline, not the medians.** On the machine measured — a Docker Desktop
+`linuxkit` VM on an Apple-silicon host, ext4 on a virtual disk, host not idle — the durable policies
+varied by up to **4.3× between the slowest and fastest trial of the same workload**, while
+`write_only` varied by at most 1.06×. That contrast localises the noise to `fdatasync` rather than
+the record path. So the committed figures bound an order of magnitude and nothing finer: batching
+bought 9.2× to 84.6× the `sync_each` throughput, and the places where that is non-monotonic across
+payload sizes sit inside the spread. Five trials is the documented minimum and is visibly not enough
+on this hardware. `RESULTS.md` leads with this before showing a number.
+
+**Batching does not reach its batch size, and ack latency does not improve.** `sync_batch(64)`
+reached 35× the baseline at 64-byte payloads, not 64×; amortising a barrier is not removing it.
+Median per-acknowledgment latency rose with batch size at two of the three payload sizes, because
+one acknowledgment now covers N records. Throughput and ack latency pull against each other, which
+is what a batch size actually chooses between.
+
+**The honesty rules are enforced in code, not by discipline.** There is no accessor for the best
+trial; percentiles are nearest-rank so no reported latency was ever interpolated; the run fails if
+the policies did not write byte-identical files or if a durable policy's barrier calls did not equal
+its acknowledgment count. Those checks exist because every one of them is a way a benchmark can
+quietly stop comparing what it claims to compare.
+
+**Unmeasured, deliberately.** Nothing here measures bare metal, cloud storage, power-loss
+persistence, or the verify/recover read path. `storage_class` is reported as `unknown` rather than
+guessed from device names, because a wrong guess silently changes how every number should be read.
+
+**Two defects in my own tests, caught by the gate.** The first draft of `test_bench` asserted that
+the environment it captured was *not* publishable, on the reasoning that the suite is built with
+sanitizers. It is — in two of the three `verify-full.sh` phases. The third builds Release with
+sanitizers off, where the correct answer is the opposite, so three cases inverted. The fix was not
+to special-case the phase but to expose the rule as `IsPublishable(build_type, sanitizers,
+supported_platform)` and check its whole truth table, which a suite can do regardless of its own
+build, plus a table test built from a hand-made report so both the warning and the no-warning branch
+are covered everywhere. The `cli_tests.sh` equivalent now asserts that the table and the JSON *agree*
+about publishability rather than asserting which answer they give. That is a better test than what
+it replaced: the original could only ever have checked one row.
+
+**One Linux-only defect, caught by the gate.** `struct ::utsname info{}` and `struct ::rusage
+usage{}` formatted differently under clang-format 14 (Debian, the supported platform) than under 17
+(Apple), which Apple clang's local run could not see. Fixed with the same local-alias pattern
+`PosixFileOps::FileSize` already used for `struct ::stat`, and the comment there now points at this
+one. That makes four defects the Linux gate has caught that macOS never reported, which is the
+argument for ADR-004 restated in practice.
+
 ## Next action
 
-M4 CPP-08: the Release benchmark — workload generator, records/sec, p50/p95/p99 durable-ack latency
-at each policy's real ack granularity, environment capture, JSON output. `docs/PRD.md` §5 fixes the
-methodology: Release builds with no sanitizers, fresh per-trial files, at least five trials, median
-and spread, and no speedup asserted before it is measured. Nothing in the repository currently
-claims a throughput or latency figure, and that must stay true until the benchmark has actually run.
+M5 CPP-09: harden and release. The remaining work named by `docs/PLAN.md` is the full sanitizer
+sweep over the commands added since M1, the CLI bounds and destructive-operation guards for
+`crash-test` and `bench` (both already refuse symlinks and nonempty overwrites, so this is a review
+rather than a build), and a README review against PRD §5 for CPP-AC16.
 
-`write_only` arrives with it, reporting `accepted_through_sequence` and never calling it durable.
+One concrete item worth doing there: route `ScanLog` through the injected `FileOps` so a read-path
+I/O error becomes testable. It has been deferred twice now because no milestone needed it.
 
-## Human decision needed
+## For the owner — acted on, not asked
 
-1. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4). M3 did not need this
-   answered — the policy's *meaning* is already normative in the PRD, and the crash harness applies
-   it by rejecting the policy outright — so the question is only about when the benchmark implements
-   it.
+Neither item below blocked anything. Both are recorded so a decision made by following the
+documents can be overturned deliberately rather than discovered later.
+
+1. **`write_only` was implemented in M4**, which is where `docs/PLAN.md` had always placed it. The
+   open question in `docs/SPEC_VALIDATION.md` §4 asked only about that ordering, never about the
+   policy's meaning, which PRD §2 and §3 already fix normatively. Its shape is ADR-008: a separate
+   method, a result type with no durability field, no barrier call anywhere, and continued exclusion
+   from the crash harness. If a different ordering was intended, ADR-008 is the decision to revisit,
+   and the policy can be refused at `Open` again without touching anything else.
+
+2. **The committed benchmark figures come from a virtual machine.** Docker Desktop's `linuxkit` VM
+   is the only Linux available here, and ADR-004 makes Linux the platform whose numbers count. The
+   environment block records it, and `RESULTS.md` says plainly that a virtualised `fdatasync` is a
+   different cost from a real one. The numbers are honest about what they measured; they are not a
+   statement about bare metal. A run on quiet physical Linux with more trials would replace them
+   with stable figures, and nothing in the repository depends on the current ones being precise.
 
 ## Correction to an earlier handoff
 

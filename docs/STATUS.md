@@ -1,9 +1,9 @@
 # Current state
 
-Milestone: **M2 complete** | Active task: none; M3 CPP-07 (crash harness) not started
+Milestone: **M3 complete** | Active task: none; M4 CPP-08 (benchmark) not started
 Branch: `main` (main-first, ADR-005)
-Last known good commit: `351afe6` (M2), verified by `./scripts/verify-linux.sh`
-Status: M1 and M2 verified on Linux; nothing pushed to `origin`
+Last known good commit: `6e4cae4` (M3), verified by `./scripts/verify-linux.sh`
+Status: M1 through M3 verified on Linux and pushed to `origin`
 
 ## Done
 
@@ -36,20 +36,31 @@ batching tradeoff is checked by assertion instead of prose: `sync_batch(32)` per
 one barrier call where `sync_each` performs 32 of each, and both produce byte-identical files.
 These are counts, not timings. **No throughput or latency number is measured or claimed.**
 
-CLI: `append` (now with `--policy sync_batch --batch-size N`), `verify`, `recover`, with the PRD's
-exit codes and `verify --json`.
+Crash harness (M3): `eventlog crash-test` spawns a writer as a child process, stops it with
+`SIGKILL` at one of six instrumented checkpoints, recovers the log, and checks it against the
+acknowledgments the supervisor recorded in its own memory *before* issuing the kill (ADR-007). The
+child parks at its checkpoint and announces it, so the kill lands on a known state rather than a
+guessed one, and a seed replays the same matrix. The acknowledged-prefix invariant is checked in one
+direction only: every acknowledged record must be present, while valid records that were never
+acknowledged are permitted and counted. Recovered records are read back and compared byte for byte
+against the deterministic payload for their sequence, so a structurally perfect record that is not
+the one that was written is caught. Hard corruption is a violation, never truncated.
 
-Six ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier (ADR-001),
-the recovery classification boundary (ADR-002), terminal sync failure (ADR-003), Linux as the
-supported platform (ADR-004), main-first development (ADR-005), and the batch acknowledgment
-boundary (ADR-006).
+CLI: `append` (now with `--policy sync_batch --batch-size N`), `verify`, `recover`, `crash-test`,
+with the PRD's exit codes and `verify --json`.
+
+Seven ADRs fix the decisions that pin a guarantee or the workflow: the durability barrier
+(ADR-001), the recovery classification boundary (ADR-002), terminal sync failure (ADR-003), Linux as
+the supported platform (ADR-004), main-first development (ADR-005), the batch acknowledgment
+boundary (ADR-006), and the crash supervisor's kill protocol and oracle (ADR-007).
 
 ## Evidence
 
-`./scripts/verify-linux.sh` **PASS** on 2026-11-05 — Linux 6.10.14 aarch64 (Debian 12 container),
-GCC 12.2.0, ext4, clang-format 14.0.6. All three phases: fast suite, exhaustive recovery sweep
-(`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 8 of 8 suites, 0 failures in each
-phase.
+`./scripts/verify-linux.sh` **PASS** on 2026-11-12 — Linux 6.10.14 aarch64 (Debian 12 container),
+GCC 12.2.0, ext4, clang-format 14.0.6, format check over 32 files. All three phases: fast suite,
+exhaustive sweep (`EVENTLOG_SLOW_TESTS=ON`), and Release build with its suite. 9 of 9 suites, 0
+failures in each phase. Total ctest time 111 s in the slow phase, of which `cli_tests` is 101 s —
+almost entirely the 300-scenario crash gate.
 
 `./scripts/verify.sh` also passes on macOS 15 / arm64 / Apple clang 17 / APFS. That is a
 convenience check, not evidence (ADR-004).
@@ -63,20 +74,31 @@ convenience check, not evidence (ADR-004).
 | `test_batch` | 12 |
 | `test_reader` | 8 |
 | `test_recovery` | 17 |
-| `cli_tests` | 83 |
-| **total** | **170** |
+| `test_crash` | 15 |
+| `cli_tests` | 125 |
+| **total** | **227** |
+
+The M3 acceptance gate from `docs/PLAN.md` runs inside `cli_tests` under `EVENTLOG_SLOW_TESTS`:
+`eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0 with 300 scenarios, 0
+violations, 50 of each checkpoint, 250 children killed, 50 incomplete tails recovered, and 261 valid
+records recovered that were never acknowledged. The same seed produces the same matrix on Linux and
+on macOS, which is what makes a failing run reproducible.
 
 Every suite builds with `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-conversion
 -Wold-style-cast` and runs under ASan + UBSan with `-fno-sanitize-recover=all` (LeakSanitizer on
 too, on Linux). The slow sweep cuts a trailing record at every byte offset of a 4096-byte record:
-4119 complete scan/plan/recover/re-verify cycles, all classified identically.
+4119 complete scan/plan/recover/re-verify cycles, all classified identically. The crash harness adds
+250 real process kills per acceptance run.
 
 ## History
 
-All on `main`, pushed to `origin` on 2026-11-10.
+All on `main`. M1 and M2 were pushed to `origin` on 2026-11-10; M3 on 2026-11-12.
 
 | Commit | Date | Subject |
 |---|---|---|
+| `6e4cae4` | 2026-11-12 | Add the crash supervisor and acknowledged-prefix oracle |
+| `c3e7717` | 2026-11-12 | Correct the workflow document's stale pull-request flow |
+| `fe7bdb2` | 2026-11-10 | Drop commit bodies and record the subject-only rule |
 | `b4b5342` | 2026-11-09 | Record milestone two commit identifiers in status |
 | `351afe6` | 2026-11-05 | Add batched writes with whole-batch acknowledgment |
 | `1c22f3b` | 2026-10-29 | Sync a resumed log instead of assuming its durability |
@@ -95,6 +117,21 @@ Before the first push, this history was rewritten twice at the owner's instructi
 rewrites touched commit metadata and `docs/STATUS.md` hash references only; no file under `src/`,
 `include/`, `tests/`, `scripts/` or `docker/` differs from the verified originals. Now that `main`
 is published, ADR-005 applies: no force-pushes, and a correction is a new commit.
+
+## Workflow documentation corrected (2026-11-12)
+
+`docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` had §7 rewritten for main-first development on
+2026-10-26, but statements elsewhere in the same file still described the feature-branch and
+pull-request flow §7 had replaced: the lifecycle diagram ended in "GitHub PR + evidence → human
+review → manual merge", §0 said to keep "one active feature branch", the CLAUDE.md template block
+said "Keep main untouched; work on a task branch", step 4 said "Work on a feature branch", step 9
+said to open a PR, and the check table keyed its gates to "Before significant PR" and "In PR CI".
+Seventeen such statements now describe committing verified work to `main`, with evidence recorded in
+this file rather than in a PR body.
+
+The header's `**Last specified:**` date, which an earlier handoff flagged as sitting ahead of its
+introducing commit, is now `2026-11-12` — the date of this revision. That resolves the discrepancy
+by making the field true rather than by arguing about it.
 
 ## Contract review (2026-10-29)
 
@@ -152,31 +189,63 @@ reported, all now fixed:
 
 ## Not done
 
-- Process-crash supervisor, checkpoints, and the acknowledged-prefix oracle (M3, CPP-07). **Until
-  this exists, the acknowledged-prefix invariant is argued but not demonstrated.**
-- Benchmarks (M4). No throughput or latency number is claimed anywhere in this repository.
-- `write_only` policy. Rejected at `Open` so no path can report it as durable.
+- Benchmarks (M4, CPP-08). No throughput or latency number is claimed anywhere in this repository.
+  The crash harness reports counts of scenarios, kills and records, never timings.
+- Harden and release (M5, CPP-09).
+- `write_only` policy. Rejected at `Open`, and rejected by the crash-test scenario parser, so no
+  path can report it as durable or fold it into the acknowledged-prefix claim.
+
+## Crash harness notes (2026-11-12)
+
+Design decisions are in ADR-007. What is worth carrying forward separately:
+
+**The oracle is tested, not just used.** A supervisor that prints `Violations: 0` proves nothing
+unless the check behind it can fail, so `tests/test_crash.cpp` runs the oracle against logs damaged
+on purpose — a missing acknowledged record, a flipped byte in a complete record, a sequence gap, a
+payload that is valid but is not the one written, a torn tail from a writer that exited normally —
+and requires each to be reported. The path from a detected violation to exit 1 is covered through
+the CLI by `--child-program`, pointing the supervisor at `tests/fake_crash_child.sh`, which claims
+an acknowledgment for a record it never wrote. That seam exists for exactly this test.
+
+**Two assertions in `cli_tests.sh` are invariants of the design, not of a seed.** Every `mid_write`
+run must leave exactly one recoverable tail, because the scenario generator never places the stop on
+a record boundary; and no other checkpoint can leave a tail at all, because each stops either before
+the write begins or after it completed. So `Incomplete tails recovered` must equal the `mid_write`
+count in any sweep. Checked across six seeds by hand before the assertions went in.
+
+**`before_write` and `after_ack` must show zero extra unacknowledged records**, while
+`after_write_before_sync` and `after_sync_before_ack` must show a nonzero count. Those four facts
+are what distinguish a checkpoint that fired from one that silently did nothing, which a bare
+`Violations: 0` cannot.
+
+Known limits, recorded rather than fixed:
+
+- If a child neither parks nor exits, the supervisor blocks in `read` until the CTest timeout. That
+  is a hang rather than a reported failure. No scenario produces it, and adding a timeout would mean
+  `poll`/`alarm` plumbing for a case that has not occurred.
+- The `--workdir` symlink check tests the final path component. Everything the harness writes lives
+  inside the subdirectory it creates itself, and only that subdirectory is removed.
+- `ScanLog` still constructs `PosixFileOps` directly, so read-path I/O errors remain outside fault
+  injection. M3 did not need it: the harness checks logs on disk through the normal read path.
+- `ApplyRecovery`'s stale-plan guard still compares file size only. The harness reaps the child
+  before recovering, so nothing can modify the file inside that window here.
 
 ## Next action
 
-M3 CPP-07: the process-crash supervisor. A child writes under an instrumented checkpoint, the
-parent records each `(sequence, durable)` acknowledgment to memory *before* issuing the kill, then
-kills, reopens and recovers. The oracle assertion is one-directional — every acknowledged record
-must appear in the recovered log; records recovered but never acknowledged are permitted.
+M4 CPP-08: the Release benchmark — workload generator, records/sec, p50/p95/p99 durable-ack latency
+at each policy's real ack granularity, environment capture, JSON output. `docs/PRD.md` §5 fixes the
+methodology: Release builds with no sanitizers, fresh per-trial files, at least five trials, median
+and spread, and no speedup asserted before it is measured. Nothing in the repository currently
+claims a throughput or latency figure, and that must stay true until the benchmark has actually run.
 
-The M2 design question about `Close()` and a partial batch did not survive the design: explicit
-batches mean there is never a partial batch to resolve (ADR-006).
-
-Two things worth doing when M3 touches them: route `ScanLog` through the injected `FileOps` so
-read-path I/O errors become testable, and re-scan under the writer lock in `ApplyRecovery` instead
-of comparing file size alone.
+`write_only` arrives with it, reporting `accepted_through_sequence` and never calling it durable.
 
 ## Human decision needed
 
-1. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4).
-2. `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` carries `**Last specified:** 2026-11-09` in
-   its header while being introduced by a commit dated 2026-09-09. Owner-authored content, left
-   as found; needs either a header edit or acceptance of the discrepancy.
+1. Confirm the M4 ordering for `write_only` (see `docs/SPEC_VALIDATION.md` §4). M3 did not need this
+   answered — the policy's *meaning* is already normative in the PRD, and the crash harness applies
+   it by rejecting the policy outright — so the question is only about when the benchmark implements
+   it.
 
 ## Correction to an earlier handoff
 

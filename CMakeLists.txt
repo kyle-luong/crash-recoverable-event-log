@@ -37,7 +37,8 @@ add_library(eventlog_core STATIC
   src/writer.cpp
   src/reader.cpp
   src/recover.cpp
-  src/payload.cpp)
+  src/payload.cpp
+  src/crash_harness.cpp)
 target_include_directories(eventlog_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(eventlog_core PUBLIC eventlog_flags)
 
@@ -46,7 +47,7 @@ target_link_libraries(eventlog PRIVATE eventlog_core)
 
 enable_testing()
 
-set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_batch test_reader test_recovery)
+set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_batch test_reader test_recovery test_crash)
 foreach(suite IN LISTS EVENTLOG_TEST_SUITES)
   add_executable(${suite} tests/${suite}.cpp)
   target_link_libraries(${suite} PRIVATE eventlog_core)
@@ -61,4 +62,9 @@ endforeach()
 
 add_test(NAME cli_tests
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.sh $<TARGET_FILE:eventlog>)
-set_tests_properties(cli_tests PROPERTIES TIMEOUT 300)
+# The crash-test sweep is the slow part of this suite, so it gets the same opt-in the
+# exhaustive recovery sweep uses.
+set_tests_properties(cli_tests PROPERTIES TIMEOUT 900)
+if(EVENTLOG_SLOW_TESTS)
+  set_tests_properties(cli_tests PROPERTIES ENVIRONMENT "EVENTLOG_SLOW_TESTS=1")
+endif()

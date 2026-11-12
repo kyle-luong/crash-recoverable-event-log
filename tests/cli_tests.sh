@@ -46,6 +46,14 @@ expect_output_contains() {
   esac
 }
 
+expect_output_lacks() {
+  local label="$1" needle="$2"
+  case "$LAST_OUTPUT" in
+    *"$needle"*) bad "$label" "output should not have contained '$needle': $LAST_OUTPUT" ;;
+    *) ok "$label" ;;
+  esac
+}
+
 file_hash() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else sha256sum "$1" | awk '{print $1}'; fi
@@ -190,8 +198,6 @@ run verify --file "$TARGET"
 expect_output_contains "overwritten log restarts at sequence 2" "Last sequence: 2"
 
 # --- unimplemented commands are honest about it -----------------------------
-expect_code "crash-test reports it is not implemented" 64 crash-test --runs 1
-expect_output_contains "crash-test names its milestone" "M3"
 expect_code "bench reports it is not implemented" 64 bench --records 1
 expect_output_contains "bench names its milestone" "M4"
 expect_code "write_only policy is rejected" 10 append --file "$WORKDIR/b.log" --records 1 --payload-bytes 8 --policy write_only
@@ -226,6 +232,103 @@ expect_code "an over-large batch buffer is a usage error" 64 append --file "$WOR
 expect_code "sync_batch resumes an existing log" 0 append --file "$WORKDIR/batch.log" --records 20 --payload-bytes 64 --policy sync_batch --batch-size 8 --append-existing
 run verify --file "$WORKDIR/batch.log"
 expect_output_contains "resumed sync_batch log verifies clean" "Valid records: 120"
+
+# --- crash-test (CPP-07 / CPP-AC10 / CPP-AC11, tests CPP-T11 to CPP-T13) -----
+#
+# The supervisor is its own assertion engine: it reports violations and exits nonzero. So
+# these cases do two things. They check that it exits 0, and they check the breakdown it
+# prints, because a checkpoint that silently did nothing would otherwise pass. What proves
+# the oracle can fail at all is test_crash.cpp, which feeds it broken logs directly.
+
+CRASH="$WORKDIR/crash"
+
+expect_code "crash-test without --workdir is a usage error" 64 crash-test --runs 2
+expect_code "crash-test rejects an unknown --scenario" 64 crash-test --runs 2 --workdir "$CRASH" --scenario after_lunch
+expect_code "crash-test rejects --runs 0" 64 crash-test --runs 0 --workdir "$CRASH"
+expect_code "crash-test rejects a non-numeric --seed" 64 crash-test --runs 2 --seed xyz --workdir "$CRASH"
+expect_code "crash-child rejects a malformed scenario spec" 64 crash-child "$CRASH/x.log" "records=1,at=none"
+expect_code "crash-child rejects a missing scenario spec" 64 crash-child "$CRASH/x.log"
+
+# An uninterrupted writer must leave exactly what it acknowledged: no extras, no losses.
+expect_code "crash-test control runs pass" 0 crash-test --runs 6 --seed 11 --workdir "$CRASH" --scenario none
+expect_output_contains "control runs report no violations" "Violations: 0"
+expect_output_contains "control runs kill nothing" "Killed: 0"
+expect_output_contains "control runs recover exactly what was acknowledged" "Extra unacknowledged: 0"
+
+# Killed before any byte of the unit reached the file: again nothing extra to recover.
+expect_code "kill before the write passes" 0 crash-test --runs 6 --seed 11 --workdir "$CRASH" --scenario before_write
+expect_output_contains "kill before the write reports no violations" "Violations: 0"
+expect_output_contains "kill before the write leaves no extra records" "Extra unacknowledged: 0"
+expect_output_contains "kill before the write killed every child" "Killed: 6"
+
+# A controlled partial write leaves a torn trailing record every time. Asserting the count
+# is what distinguishes "the tail path was exercised" from "the checkpoint did nothing".
+expect_code "kill mid-write passes" 0 crash-test --runs 6 --seed 11 --workdir "$CRASH" --scenario mid_write
+expect_output_contains "kill mid-write reports no violations" "Violations: 0"
+expect_output_contains "every mid-write run left a recoverable tail" "Incomplete tails recovered: 6"
+
+# CPP-T11: written but not synced, so not acknowledged. Whatever is recovered is extra.
+expect_code "kill after the write before the sync passes" 0 crash-test --runs 6 --seed 11 --workdir "$CRASH" --scenario after_write_before_sync
+expect_output_contains "kill before the sync reports no violations" "Violations: 0"
+expect_output_contains "a completed write leaves no torn record" "Incomplete tails recovered: 0"
+expect_output_lacks "kill before the sync recovers records it never acknowledged" "Extra unacknowledged: 0"
+
+# CPP-T12 and CPP-AC11: durable, but the supervisor was never told. The records are
+# allowed to come back, and must not be counted as acknowledged.
+expect_code "kill after the sync before the ack passes" 0 crash-test --runs 6 --seed 11 --workdir "$CRASH" --scenario after_sync_before_ack
+expect_output_contains "kill before the ack reports no violations" "Violations: 0"
+expect_output_lacks "kill before the ack recovers an unacknowledged record" "Extra unacknowledged: 0"
+
+# CPP-T13: the acknowledgment was observed, so every record it covered must be present.
+expect_code "kill after the ack was observed passes" 0 crash-test --runs 6 --seed 11 --workdir "$CRASH" --scenario after_ack
+expect_output_contains "kill after the ack reports no violations" "Violations: 0"
+expect_output_contains "kill after the ack loses nothing" "Extra unacknowledged: 0"
+
+# The mixed sweep cycles every checkpoint, so a small --runs still covers all six.
+expect_code "the mixed crash-test sweep passes" 0 crash-test --runs 12 --seed 42 --workdir "$CRASH"
+expect_output_contains "the sweep reports no violations" "Violations: 0"
+expect_output_contains "the sweep exercises every checkpoint" "none 2  before_write 2  mid_write 2  after_write_before_sync 2  after_sync_before_ack 2  after_ack 2"
+# A torn record comes from mid_write and from nothing else: every other checkpoint stops
+# either before the write starts or after it finished.
+expect_output_contains "only the mid-write runs left tails" "Incomplete tails recovered: 2"
+expect_output_contains "the sweep names the process-crash model" "not power loss"
+
+# One seed, one matrix: a failing run can be replayed.
+run crash-test --runs 12 --seed 42 --workdir "$CRASH"
+CRASH_REPEAT="$LAST_OUTPUT"
+run crash-test --runs 12 --seed 42 --workdir "$CRASH"
+if [ "$CRASH_REPEAT" = "$LAST_OUTPUT" ]; then ok "the same seed produces the same matrix"
+else bad "the same seed produces the same matrix" "output differed between runs"; fi
+
+# Fixtures are the harness's own and are cleaned up when every run passes.
+if [ -z "$(ls -A "$CRASH")" ]; then ok "passing runs leave no fixtures behind"
+else bad "passing runs leave no fixtures behind" "$(ls -A "$CRASH")"; fi
+
+# The harness creates and deletes files, so it refuses a scratch root it cannot trust.
+ln -s "$CRASH" "$WORKDIR/crash-link" 2>/dev/null
+if [ -L "$WORKDIR/crash-link" ]; then
+  expect_code "crash-test refuses a symlinked workdir" 3 crash-test --runs 2 --workdir "$WORKDIR/crash-link"
+  expect_output_contains "symlinked workdir refusal says why" "symlink"
+fi
+
+# A supervisor that cannot fail proves nothing. Substituting a writer that claims a
+# durable acknowledgment for a record it never wrote must produce a reported violation and
+# a nonzero exit, end to end.
+FAKE_CHILD="$(dirname "$0")/fake_crash_child.sh"
+FAKECRASH="$WORKDIR/crash-fake"
+expect_code "a falsely acknowledged record is a violation" 1 crash-test --runs 1 --workdir "$FAKECRASH" --child-program "$FAKE_CHILD"
+expect_output_contains "the violation names the lost acknowledgment" "lost acknowledged records"
+expect_output_contains "the violation reports the count" "Violations: 1"
+expect_output_contains "the violation names the scenario to replay" "records="
+if [ -n "$(ls -A "$FAKECRASH")" ]; then ok "a failing run keeps its fixtures"
+else bad "a failing run keeps its fixtures" "$FAKECRASH is empty"; fi
+
+# The acceptance gate from docs/PLAN.md. Slow, so it runs with the exhaustive sweep.
+if [ "${EVENTLOG_SLOW_TESTS:-0}" = "1" ]; then
+  expect_code "the 300-scenario acceptance gate passes" 0 crash-test --runs 300 --seed 42 --workdir "$CRASH"
+  expect_output_contains "the gate ran 300 scenarios" "Scenarios: 300"
+  expect_output_contains "the gate reports no violations" "Violations: 0"
+fi
 
 # --- edge cases --------------------------------------------------------------
 expect_code "zero records succeeds" 0 append --file "$WORKDIR/zero.log" --records 0 --payload-bytes 8

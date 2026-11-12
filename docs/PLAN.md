@@ -11,7 +11,7 @@ its command passes from a clean build directory **on Linux** — the supported p
 | **M0** | CPP-00 | CMake C++20 scaffold, warnings, sanitizer Debug path, Release target, format check, CI, docs | `./scripts/verify.sh` on a clean checkout | done |
 | **M1** | CPP-01…04 | Record codec + CRC32C, `sync_each` writer with advisory lock, log scanner, incomplete-tail recovery, `append`/`verify`/`recover` CLI | `./scripts/verify-linux.sh` | done |
 | **M2** | CPP-05, CPP-06 | `append_batch_and_sync` with whole-batch ack boundaries (ADR-006); shared `FileOps` fault injection (short write, `EINTR`, `EIO`, failed sync) driving batch and recovery cases | `./scripts/verify-linux.sh` (170 cases, 8 suites) | done |
-| **M3** | CPP-07 | Subprocess supervisor, `SIGKILL` at instrumented checkpoints, independent ack oracle, acknowledged-prefix invariant over many runs | `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0 | todo |
+| **M3** | CPP-07 | Subprocess supervisor, `SIGKILL` at instrumented checkpoints, independent ack oracle, acknowledged-prefix invariant over many runs (ADR-007) | `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0, inside `./scripts/verify-linux.sh` | done |
 | **M4** | CPP-08 | Release benchmark: workload generator, records/sec, p50/p95/p99 durable-ack latency, environment capture, JSON output | `eventlog bench --trials 5 --out out/results.json`, reviewed against `benchmarks/README.md` methodology | todo |
 | **M5** | CPP-09 | Harden and release: full sanitizer sweep, CLI bounds and destructive-op guards, honest README with measured sample output | `./scripts/verify-linux.sh` + manual README review against PRD §5 | todo |
 
@@ -34,7 +34,8 @@ must not be described as satisfied.
 | CPP-AC07 | `test_writer` failed-sync terminal state (ADR-003); `test_batch` reconfirms it at batch granularity | M1, M2 |
 | CPP-AC08 | `test_recovery` tail cut at **every** byte offset of a record; truncation only with explicit opt-in | M1 |
 | CPP-AC09 | `test_recovery` byte flip in final record, byte flip in middle record, sequence gap and duplicate | M1 |
-| CPP-AC10, AC11 | — | M3 |
+| CPP-AC10 | `test_crash` oracle negative controls (lost acknowledgment, flipped byte in a complete record, sequence gap, fabricated payload, tail from a clean exit); `cli_tests.sh` kill matrix at all six checkpoints, plus a stand-in child whose false acknowledgment must be reported | M3 |
+| CPP-AC11 | `test_crash` accepts records recovered but never acknowledged; `cli_tests.sh` requires a nonzero extra count at `after_write_before_sync` and `after_sync_before_ack`, and zero at `before_write` and `after_ack` | M3 |
 | CPP-AC12 | `cli_tests.sh` bounds, overwrite refusal, symlink refusal | M1 (extended in M5) |
 | CPP-AC13 | — | M4 |
 | CPP-AC14 | ASan + UBSan Debug build is the default `verify.sh` path; `-Werror` under both GCC 12 (Linux) and Apple clang | M1 (full sweep M5) |
@@ -50,8 +51,15 @@ those paths.
 **M2.** In scope: `sync_batch` with whole-batch acknowledgment, the batch bounds, and promoting the
 fault-injection double to a shared fixture that drives batch and recovery cases.
 
-Out of scope, by decision: the crash supervisor, benchmarks, `write_only`, concurrent writers,
-mid-log repair, and compaction. `SyncPolicy::kWriteOnly` exists in the enum but is rejected at
-`Open` so that no code path can report a non-durable policy's result as durable. **No throughput
-or latency number is measured or claimed before M4.** The syscall counts `WriterStats` exposes are
-counts, not timings, and the README says so.
+**M3.** In scope: the subprocess supervisor, the six instrumented checkpoints, the in-memory
+acknowledgment oracle, harness-owned recovery of a torn tail, and the `crash-test` CLI command
+(ADR-007). The two PRD fault mechanisms stay separate: injected `FileOps` failures (M2) test error
+handling in process, and process termination tests the acknowledgment boundary across a death.
+Controlled kill timing only — a parked child killed at a known point, not a race.
+
+Out of scope, by decision: benchmarks, `write_only`, concurrent writers, mid-log repair, and
+compaction. `SyncPolicy::kWriteOnly` exists in the enum but is rejected at `Open` and by the
+crash-test scenario parser, so no code path can report a non-durable policy's result as durable or
+fold it into the acknowledged-prefix claim. **No throughput or latency number is measured or
+claimed before M4.** The syscall counts `WriterStats` exposes are counts, not timings, and the
+README says so.

@@ -90,3 +90,12 @@ clearly enough to implement and are not blocked:
 Milestone 1 implements the policy enum but intentionally leaves `write_only` unimplemented, so no
 code path can report it as durable before the benchmark milestone defines its reporting. Confirm
 this is the intended ordering when M4 is planned.
+
+**M3 did not need this answered (2026-11-12).** The question is about *when* `write_only` gets
+implemented, not about what it means. What it means is already normative: PRD §2 says its result is
+marked accepted, not durable, and that it "MUST NEVER be included in the acknowledged-prefix
+correctness claim"; §3 says it "can report `accepted_through_sequence` but never calls it durable";
+§4 says "For `write_only` there are no durable acknowledgments to compare". The crash harness
+therefore rejects the policy in its scenario parser (ADR-007), which is the documented contract
+applied rather than a new decision. The open question stands for M4 planning and nothing in M3
+depends on it.

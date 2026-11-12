@@ -1,8 +1,11 @@
 #include "eventlog/cli.h"
 
+#include <unistd.h>
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <span>
@@ -11,6 +14,7 @@
 #include <system_error>
 #include <vector>
 
+#include "eventlog/crash_test.h"
 #include "eventlog/error.h"
 #include "eventlog/file_ops.h"
 #include "eventlog/payload.h"
@@ -22,6 +26,7 @@ namespace eventlog {
 namespace {
 
 constexpr std::uint64_t kMaxRecordsPerInvocation = 10'000'000;
+constexpr std::uint64_t kMaxCrashTestRuns = 100'000;
 
 void PrintUsage(std::ostream& out) {
   out << R"(eventlog - crash-safe append-only event log
@@ -32,6 +37,9 @@ Usage:
                    [--append-existing | --overwrite]
   eventlog verify  --file PATH [--json PATH]
   eventlog recover --file PATH [--truncate-tail]
+  eventlog crash-test --workdir DIR [--runs N] [--seed N] [--scenario NAME]
+                      [--child-program PATH]
+  eventlog crash-child LOG SCENARIO-SPEC
   eventlog --help | --version
 
 Commands:
@@ -44,12 +52,33 @@ Commands:
             Exit 0 clean, 1 incomplete trailing record, 2 hard corruption.
   recover   Reports a structurally incomplete trailing record. Truncates it only
             when --truncate-tail is given, and never touches hard corruption.
+  crash-test
+            Spawns a writer, stops it at an instrumented checkpoint with
+            SIGKILL, recovers the log, and checks it against the
+            acknowledgments this supervisor observed itself. Every
+            acknowledged record must be present; valid records that were
+            never acknowledged are permitted and counted. Exit 0 all
+            invariants held, 1 a correctness violation, 3 harness failure.
+            Fixtures live in one fresh subdirectory of --workdir, and are
+            removed unless a run fails. --scenario forces one checkpoint:
+            none, before_write, mid_write, after_write_before_sync,
+            after_sync_before_ack, after_ack. Without it, runs cycle
+            through all six and --seed varies the workload.
+            --child-program substitutes the writer with another program
+            speaking the same frame protocol; it exists to test this
+            supervisor's own failure detection.
+  crash-child
+            The instrumented writer crash-test spawns. Not useful on its
+            own: it reports acknowledgments on stdout and stops itself at
+            the checkpoint its scenario spec names, waiting to be killed.
 
 Durability: a record counts as durable only after this platform's barrier
 ()" << SyncPrimitiveName()
-      << R"() returns success. A process kill is not a power failure.
+      << R"() returns success. A process kill is not a power failure, so
+crash-test proves the acknowledgment contract for the process-crash and
+injected-fault model and nothing wider.
 
-Planned in later milestones: crash-test (M3), bench and write_only (M4).
+Planned in a later milestone: bench and write_only (M4).
 )";
 }
 
@@ -415,6 +444,96 @@ int CommandRecover(int argc, char** argv) {
   return kExitOk;
 }
 
+// --- crash-test ---------------------------------------------------------------
+
+int CommandCrashTest(int argc, char** argv) {
+  Arguments args;
+  Status parsed =
+      args.Parse(argc, argv, 2, {"runs", "seed", "workdir", "scenario", "child-program"}, {});
+  if (!parsed.ok()) return FailUsage(parsed.error());
+
+  CrashTestOptions options;
+  if (!args.has_value("workdir")) {
+    return FailUsage(Error(ErrorKind::kInvalidArgument,
+                           "--workdir is required: crash-test writes only inside a scratch root"));
+  }
+  options.workdir = std::filesystem::path(args.value("workdir"));
+
+  if (args.has_value("runs")) {
+    Result<std::uint64_t> runs = args.required_u64("runs", kMaxCrashTestRuns);
+    if (!runs.ok()) return FailUsage(runs.error());
+    if (runs.value() == 0) {
+      return FailUsage(Error(ErrorKind::kInvalidArgument, "--runs must be at least 1"));
+    }
+    options.runs = runs.value();
+  }
+  if (args.has_value("seed")) {
+    Result<std::uint64_t> seed =
+        args.required_u64("seed", std::numeric_limits<std::uint64_t>::max());
+    if (!seed.ok()) return FailUsage(seed.error());
+    options.seed = seed.value();
+  }
+  if (args.has_value("scenario")) {
+    Result<Checkpoint> checkpoint = ParseCheckpoint(args.value("scenario"));
+    if (!checkpoint.ok()) return FailUsage(checkpoint.error());
+    options.forced_checkpoint = checkpoint.value();
+  }
+
+  if (args.has_value("child-program")) {
+    // A testing seam. Substituting a program that speaks the same frame protocol is how
+    // the supervisor's own failure detection gets exercised: a stand-in that claims an
+    // acknowledgment it never earned must be caught and reported.
+    options.child_program = std::filesystem::path(args.value("child-program"));
+  } else {
+    // Normally the supervisor re-executes this same binary in child mode.
+    Result<std::filesystem::path> self = SelfExecutablePath(argv[0]);
+    if (!self.ok()) return Fail(self.error(), kExitHarnessFailure);
+    options.child_program = self.value();
+  }
+
+  Result<CrashTestSummary> result = RunCrashTest(options);
+  if (!result.ok()) return Fail(result.error(), kExitHarnessFailure);
+  const CrashTestSummary& summary = result.value();
+
+  std::cout << "Scenarios: " << summary.scenarios << "   Violations: " << summary.violations
+            << "   Incomplete tails recovered: " << summary.incomplete_tails_recovered << "\n";
+  std::cout << "Checkpoints:";
+  for (std::size_t i = 0; i < kCheckpointCount; ++i) {
+    std::cout << "  " << CheckpointName(static_cast<Checkpoint>(i)) << " "
+              << summary.by_checkpoint[i];
+  }
+  std::cout << "\n";
+  std::cout << "Killed: " << summary.killed
+            << "   Acknowledged records: " << summary.acknowledged_records
+            << "   Recovered records: " << summary.recovered_records
+            << "   Extra unacknowledged: " << summary.extra_unacknowledged << "\n";
+  std::cout << "Seed: " << options.seed << "   Durability barrier: " << SyncPrimitiveName()
+            << "   Model: process kill, not power loss\n";
+
+  for (const std::string& detail : summary.violation_details) {
+    std::cerr << "violation: " << detail << "\n";
+  }
+  if (summary.violations > 0) {
+    std::cerr << "Fixtures for the failing runs were kept under " << options.workdir.string()
+              << "\n";
+    return kExitCorrectnessFailure;
+  }
+  return kExitOk;
+}
+
+// Internal, spawned by crash-test with the frame channel on stdout. Listed in the usage
+// text rather than hidden, because a command that exists should be discoverable.
+int CommandCrashChild(int argc, char** argv) {
+  if (argc != 4) {
+    return FailUsage(Error(
+        ErrorKind::kInvalidArgument,
+        "crash-child is spawned by crash-test; usage: crash-child <log-path> <scenario-spec>"));
+  }
+  Result<CrashScenario> scenario = ParseScenario(argv[3]);
+  if (!scenario.ok()) return FailUsage(scenario.error());
+  return RunCrashChild(std::filesystem::path(argv[2]), scenario.value(), STDOUT_FILENO);
+}
+
 int NotYetImplemented(std::string_view command, std::string_view milestone) {
   std::cerr << "error: " << command << " is planned for milestone " << milestone
             << " and is not implemented yet.\n"
@@ -443,7 +562,8 @@ int RunCli(int argc, char** argv) {
   if (command == "append") return CommandAppend(argc, argv);
   if (command == "verify") return CommandVerify(argc, argv);
   if (command == "recover") return CommandRecover(argc, argv);
-  if (command == "crash-test") return NotYetImplemented("crash-test", "M3");
+  if (command == "crash-test") return CommandCrashTest(argc, argv);
+  if (command == "crash-child") return CommandCrashChild(argc, argv);
   if (command == "bench") return NotYetImplemented("bench", "M4");
 
   std::cerr << "error: unknown command \"" << command << "\"\n\n";

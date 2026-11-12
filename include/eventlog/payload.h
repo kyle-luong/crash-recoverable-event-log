@@ -17,6 +17,11 @@ namespace eventlog {
 // payload to check a recovered log.
 void FillDeterministicPayload(std::uint64_t sequence, std::span<std::byte> out);
 
+// The one pseudorandom source in this project. Payload bytes and crash-test scenario
+// choices both come from it, so a seed fully determines what a run does. Advances
+// `state` and returns the next value.
+std::uint64_t SplitMix64(std::uint64_t& state);
+
 std::vector<std::byte> MakeDeterministicPayload(std::uint64_t sequence, std::size_t size);
 
 }  // namespace eventlog

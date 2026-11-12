@@ -7,9 +7,10 @@ durable before the process died?*
 This is not a database, a queue, or a distributed log. It is one local file, one writer, a
 checksummed record format, and a recovery path that refuses to guess.
 
-**Status:** milestones M1–M2 complete — record format, `sync_each` and `sync_batch` writers, log
-verification, incomplete-tail recovery, and fault injection over the syscall boundary. The
-process-crash harness and benchmarks are specified and not yet built; see
+**Status:** milestones M1–M3 complete — record format, `sync_each` and `sync_batch` writers, log
+verification, incomplete-tail recovery, fault injection over the syscall boundary, and the
+process-crash harness that kills a writer at instrumented checkpoints and checks the recovered log
+against independently observed acknowledgments. Benchmarks are specified and not yet built; see
 [docs/PLAN.md](docs/PLAN.md). No performance numbers are claimed anywhere in this repository,
 because none have been measured yet.
 
@@ -93,6 +94,23 @@ Valid records: 999   Last sequence: 999   Status: clean
 Note that 112 bytes were discarded, not the 40 that were cut: the whole partial record goes, because
 a record is the unit of validity.
 
+Prove the acknowledgment contract against actual process death:
+
+```console
+$ eventlog crash-test --runs 300 --seed 42 --workdir ./tmp-crash-tests
+Scenarios: 300   Violations: 0   Incomplete tails recovered: 50
+Checkpoints:  none 50  before_write 50  mid_write 50  after_write_before_sync 50  after_sync_before_ack 50  after_ack 50
+Killed: 250   Acknowledged records: 1029   Recovered records: 1290   Extra unacknowledged: 261
+Seed: 42   Durability barrier: fdatasync   Model: process kill, not power loss
+```
+
+Measured output from a Linux run, not a sample. Each scenario spawns a writer, stops it with
+`SIGKILL` at one instrumented point, recovers the log, and checks it against the acknowledgments
+this supervisor saw. *Extra unacknowledged* is the interesting column: 261 valid records came back
+that nobody was ever told were durable. That is correct and expected — the invariant is
+one-directional. The reverse, a single acknowledged record missing from a recovered log, is a
+violation and fails the run.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -102,6 +120,14 @@ a record is the unit of validity.
 | 2 | hard corruption, or an unsupported format version — nothing was modified |
 | 10 | I/O or contract error |
 | 64 | invalid arguments |
+
+`crash-test` uses its own small set, because "what went wrong" matters more there than where:
+
+| Code | Meaning |
+|---:|---|
+| 0 | every supported invariant held |
+| 1 | a correctness violation, reported with the scenario that produced it |
+| 3 | the harness itself could not run |
 
 ## What is actually guaranteed
 
@@ -156,7 +182,8 @@ its byte offset and left untouched — including when it is the last record in t
 
 - **A process crash is not a power failure.** `SIGKILL` stops a process; it does not clear the
   kernel page cache or cut power to a drive mid-write. Nothing here has been tested against real
-  power loss, and the upcoming crash harness will not change that.
+  power loss, and the crash harness does not change that — it kills processes, which is a strictly
+  weaker fault than losing power.
 - **Hardware that lies is out of scope.** Drives that acknowledge a cache flush without performing
   one, filesystem bugs, and media failure are outside what any of this proves.
 - **CRC32C is not authentication.** It detects accidental corruption. A deliberately crafted file
@@ -166,9 +193,14 @@ its byte offset and left untouched — including when it is the last record in t
 - **No live-reader consistency claim.** Reading a log while a writer is appending is not a supported
   mode in this milestone.
 
-The honest form of the claim this project aims to support is: *zero lost externally acknowledged
-durable records, in the tested process-crash and injected-write-fault scenarios.* The crash harness
-that will test it is milestone M3 and does not exist yet, so that claim is **not yet substantiated**.
+The honest form of the claim this project supports is: *zero lost externally acknowledged durable
+records, in the tested process-crash and injected-write-fault scenarios.* That is now demonstrated
+rather than argued. `eventlog crash-test` spawns a writer, stops it with `SIGKILL` at one of six
+instrumented points, recovers the log, and checks it against the acknowledgments the supervisor
+recorded in its own memory before issuing the kill — 300 scenarios per acceptance run, every
+checkpoint exercised ([ADR-007](docs/decisions/ADR-007-crash-supervisor-design.md)). The scope of
+the claim is exactly the words above: process crashes and injected write faults, under ordinary
+Linux filesystem semantics, and nothing wider.
 
 ## Record format v1
 
@@ -205,11 +237,11 @@ bytes for any record.
 ```
 include/eventlog/   public headers (error, record, crc32c, file_ops, writer, reader, recover)
 src/                implementation; file_ops.cpp is the only POSIX boundary
-tests/              6 C++ suites plus a CLI integration suite (138 cases)
+tests/              8 C++ suites plus a CLI integration suite
 docs/PRD.md         the product contract
 docs/PLAN.md        milestones, with the verification command for each
 docs/STATUS.md      current state and next action
-docs/decisions/     ADRs for the three decisions that fix a guarantee
+docs/decisions/     ADRs for the decisions that fix a guarantee or the workflow
 ```
 
 `FileOps` is the one extracted interface, and it exists because the fault tests have to produce
@@ -223,12 +255,22 @@ test_scaffold  error/result types, syscall context in messages, scratch-dir disc
 test_crc32c    published CRC-32C vectors, chaining, all 2048 single-bit flips of a 256-byte block
 test_codec     golden byte vectors, round-trips at 0/1/128/1 MiB, every rejection path
 test_writer    short writes, EINTR retry, EIO, failed sync, lock contention, policy guards
+test_batch     whole-batch acknowledgment, failed batch write and sync, syscall counts
 test_reader    1000-record round-trip byte-for-byte, scan report accuracy
 test_recovery  every byte offset of a trailing record, mid-log corruption, sequence violations
-cli_tests      exit codes, argument bounds, read-only verify, destructive-operation guards
+test_crash     the acknowledged-prefix oracle, against logs damaged on purpose
+cli_tests      exit codes, argument bounds, read-only verify, destructive-operation
+               guards, and the kill matrix at all six crash-test checkpoints
 ```
 
 The recovery suite cuts a trailing record at **every** byte offset and checks that each cut is
 classified, planned, and recovered identically: 4119 complete recover cycles for a 4096-byte
 record in the slow sweep, plus every offset of a 32-byte and a header-only record in the fast one. Tests
 write only inside per-test scratch directories that are removed even when a case fails.
+
+`test_crash` exists because a supervisor that reports `Violations: 0` is worth nothing unless its
+check can fail. It feeds the oracle logs that break each invariant on purpose — a missing
+acknowledged record, a flipped byte in a complete record, a sequence gap, a payload that is valid
+but is not the one that was written, a torn tail left by a writer that exited normally — and
+requires it to say so. The path from a detected violation to a nonzero exit is covered separately,
+by running `crash-test` against a stand-in child that claims an acknowledgment it never earned.

@@ -10,6 +10,8 @@ namespace {
 
 constexpr std::uint64_t kGoldenGamma = 0x9E3779B97F4A7C15ull;
 
+}  // namespace
+
 std::uint64_t SplitMix64(std::uint64_t& state) {
   state += kGoldenGamma;
   std::uint64_t z = state;
@@ -17,8 +19,6 @@ std::uint64_t SplitMix64(std::uint64_t& state) {
   z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
   return z ^ (z >> 31);
 }
-
-}  // namespace
 
 void FillDeterministicPayload(std::uint64_t sequence, std::span<std::byte> out) {
   std::uint64_t state = sequence * kGoldenGamma;

@@ -1,8 +1,8 @@
 # Benchmark methodology
 
-**There are no measured results in this repository yet.** This file fixes the method before any
-number exists, so that a result cannot be shaped after the fact. Benchmarks are milestone M4; see
-`docs/PLAN.md`.
+This file fixed the method before any number existed, so that a result could not be shaped after
+the fact. The procedure below is unchanged since then; the results it governs are in
+[RESULTS.md](RESULTS.md), with the raw reports committed beside them.
 
 Nothing in this directory, the README, or any commit message may quote a throughput or latency
 figure that was not produced by the procedure below and recorded with its full environment.
@@ -34,6 +34,13 @@ figure that was not produced by the procedure below and recorded with its full e
    filesystem's sync semantics.
 10. Explain OS page-cache effects. Do not compare any of this to real power-loss persistence.
 
-Benchmarks are reports, not CI gates: CI stays deterministic and lightweight. Raw output belongs in
-an ignored `out/`; a curated reproducible example may be committed here once it has actually been
-run.
+Benchmarks are reports, not CI gates: CI stays deterministic and lightweight. The test suite
+exercises `bench` with tiny workloads and asserts syscall counts and report structure, never a
+duration. Raw output from ad-hoc runs belongs in an ignored `out/`; the curated example in
+[RESULTS.md](RESULTS.md) and its `results-*.json` are committed because they have actually been run.
+
+`eventlog bench` enforces most of the above rather than trusting anyone to remember it: a report
+states whether it may be quoted, percentiles are nearest-rank so every figure is an observed sample,
+there is no way to ask for the best trial, and a run whose policies did not write identical bytes or
+whose barrier calls did not match its acknowledgment granularity fails instead of reporting
+([ADR-008](../docs/decisions/ADR-008-write-only-and-benchmark-honesty.md)).

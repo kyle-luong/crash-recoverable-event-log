@@ -197,11 +197,25 @@ expect_code "--overwrite replaces an existing log" 0 append --file "$TARGET" --r
 run verify --file "$TARGET"
 expect_output_contains "overwritten log restarts at sequence 2" "Last sequence: 2"
 
-# --- unimplemented commands are honest about it -----------------------------
-expect_code "bench reports it is not implemented" 64 bench --records 1
-expect_output_contains "bench names its milestone" "M4"
-expect_code "write_only policy is rejected" 10 append --file "$WORKDIR/b.log" --records 1 --payload-bytes 8 --policy write_only
-expect_output_contains "write_only names its milestone" "M4"
+
+# --- write_only: accepted, never durable (ADR-008) ---------------------------
+expect_code "write_only appends without syncing" 0 append --file "$WORKDIR/wo.log" --records 20 --payload-bytes 8 --policy write_only
+expect_output_contains "write_only reports acceptance" "Accepted (NOT durable): 20"
+# It must not expose the same acknowledgment status as a synchronized policy.
+expect_output_lacks "write_only claims no durable acknowledgement" "Durable acknowledged"
+expect_output_contains "write_only says what it skipped" "never calls"
+expect_output_contains "write_only costs no barrier calls" "Barrier calls: 0"
+run verify --file "$WORKDIR/wo.log"
+expect_output_contains "a write_only log is still a valid log" "Status: clean"
+expect_output_contains "a write_only log holds every record" "Valid records: 20"
+# The policy changes when the barrier is called, never what is written.
+expect_code "sync_each writes the same workload as write_only" 0 append --file "$WORKDIR/wo-each.log" --records 20 --payload-bytes 8
+if [ "$(file_hash "$WORKDIR/wo.log")" = "$(file_hash "$WORKDIR/wo-each.log")" ]; then
+  ok "write_only and sync_each produce identical bytes"
+else
+  bad "write_only and sync_each produce identical bytes" "hashes differ"
+fi
+expect_code "write_only rejects a batch size" 10 append --file "$WORKDIR/wo2.log" --records 4 --payload-bytes 8 --policy write_only --batch-size 8
 expect_code "unknown policy is a usage error" 64 append --file "$WORKDIR/c.log" --records 1 --payload-bytes 8 --policy turbo
 
 # --- sync_batch (CPP-05 / CPP-AC06) ------------------------------------------
@@ -328,6 +342,73 @@ if [ "${EVENTLOG_SLOW_TESTS:-0}" = "1" ]; then
   expect_code "the 300-scenario acceptance gate passes" 0 crash-test --runs 300 --seed 42 --workdir "$CRASH"
   expect_output_contains "the gate ran 300 scenarios" "Scenarios: 300"
   expect_output_contains "the gate reports no violations" "Violations: 0"
+fi
+
+# --- bench (CPP-AC13, tests CPP-T16 and CPP-T17) -----------------------------
+#
+# No case here asserts a throughput or latency figure: this suite runs under sanitizers,
+# where such a number would be meaningless. What is checked is that the report says what
+# it measured and disqualifies itself when it cannot be quoted.
+
+BENCH="$WORKDIR/bench"
+expect_code "bench without --out is a usage error" 64 bench --records 4
+expect_code "bench rejects more trials than the limit" 64 bench --out "$BENCH/r.json" --records 4 --trials 999
+expect_code "bench rejects a payload above the format limit" 64 bench --out "$BENCH/r.json" --records 4 --payload-bytes 1048577
+# Bounded before a byte is written, so an over-budget request fails immediately.
+expect_code "bench refuses an over-budget run" 64 bench --out "$BENCH/r.json" --records 1000000 --payload-bytes 1048576 --trials 5
+expect_output_contains "the budget refusal names the limit" "the limit is"
+
+expect_code "bench runs and writes a report" 0 bench --out "$BENCH/results.json" --records 40 --payload-bytes 32 --trials 2
+BENCH_OUTPUT="$LAST_OUTPUT"
+expect_output_contains "bench prints a comparison table" "vs baseline"
+expect_output_contains "bench compares every documented policy" "sync_batch(64)"
+expect_output_contains "bench labels the accepted-only policy" "accepted, not durable"
+expect_output_contains "bench states the trial count it summarised" "Median of 2 trials"
+
+# This suite runs against both a sanitizer build and a Release one, so the assertion is
+# that the table and the JSON agree about publishability -- not that either answer is the
+# one this build happens to give.
+if grep -q '"publishable": false' "$BENCH/results.json"; then
+  case "$BENCH_OUTPUT" in
+    *"must not be quoted"*) ok "a disqualified build warns above its own numbers" ;;
+    *) bad "a disqualified build warns above its own numbers" "no warning in: $BENCH_OUTPUT" ;;
+  esac
+else
+  case "$BENCH_OUTPUT" in
+    *WARNING*) bad "a publishable build prints no warning" "unexpected warning: $BENCH_OUTPUT" ;;
+    *) ok "a publishable build prints no warning" ;;
+  esac
+fi
+
+if grep -q '"publishable"' "$BENCH/results.json" &&
+   grep -q '"publishable_note"' "$BENCH/results.json" &&
+   grep -q '"compiler"' "$BENCH/results.json" &&
+   grep -q '"filesystem"' "$BENCH/results.json" &&
+   grep -q '"storage_class": "unknown"' "$BENCH/results.json" &&
+   grep -q '"percentile_method"' "$BENCH/results.json" &&
+   grep -q '"accepted_not_durable"' "$BENCH/results.json" &&
+   grep -q '"durable_ack_latency_applicable": false' "$BENCH/results.json"; then
+  ok "the json report carries its environment, units, and durability status"
+else
+  bad "the json report carries its environment, units, and durability status" "$(head -30 "$BENCH/results.json")"
+fi
+
+# A report is a file worth not clobbering by accident.
+expect_code "bench refuses to overwrite an existing report" 64 bench --out "$BENCH/results.json" --records 4 --payload-bytes 8 --trials 1
+expect_output_contains "the overwrite refusal names the flag" "--overwrite"
+expect_code "bench --overwrite replaces a report" 0 bench --out "$BENCH/results.json" --records 4 --payload-bytes 8 --trials 1 --overwrite
+
+ln -s "$BENCH/results.json" "$BENCH/report-link.json" 2>/dev/null
+if [ -L "$BENCH/report-link.json" ]; then
+  expect_code "bench refuses to write through a symlink" 10 bench --out "$BENCH/report-link.json" --records 4 --payload-bytes 8 --trials 1
+  expect_output_contains "the symlink refusal says why" "symlink"
+fi
+
+# One trial's file at a time, and none left over.
+if [ -z "$(find "$BENCH" -maxdepth 1 -name 'bench-*' -print -quit)" ]; then
+  ok "bench leaves no scratch fixtures behind"
+else
+  bad "bench leaves no scratch fixtures behind" "$(ls -A "$BENCH")"
 fi
 
 # --- edge cases --------------------------------------------------------------

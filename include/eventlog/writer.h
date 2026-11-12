@@ -18,7 +18,7 @@ namespace eventlog {
 enum class SyncPolicy {
   kSyncEach,   // one record, one sync, one acknowledgment
   kSyncBatch,  // N records, one sync, whole-batch acknowledgment (milestone M2)
-  kWriteOnly,  // diagnostic only: ACCEPTED, never durable (milestone M4)
+  kWriteOnly,  // diagnostic only: ACCEPTED, never durable (ADR-008)
 };
 
 std::string_view SyncPolicyName(SyncPolicy policy);
@@ -47,6 +47,14 @@ struct AppendResult {
   std::uint64_t durable_through_sequence = 0;
 };
 
+// The result of a write_only append. It deliberately carries no durability field at all:
+// this policy never calls the barrier, so there is no durable sequence to report and no
+// way for a caller to mistake one for being present (ADR-008, docs/PRD.md section 2).
+struct AcceptResult {
+  std::uint64_t sequence = 0;
+  std::uint64_t accepted_through_sequence = 0;
+};
+
 // One whole-batch acknowledgment. Every sequence in [first_sequence, last_sequence] is
 // durable, or none of them is: a batch is acknowledged as a unit or not at all (ADR-006).
 struct BatchAppendResult {
@@ -58,11 +66,12 @@ struct BatchAppendResult {
 
 // Syscall counts for the durability path. These make the batching tradeoff checkable by
 // assertion rather than by timing: sync_batch(32) must perform one write and one sync
-// where sync_each performs thirty-two of each. Measured throughput is milestone M4.
+// where sync_each performs thirty-two of each. Whether that buys proportional throughput
+// is a measurement, made by `eventlog bench` and recorded in benchmarks/RESULTS.md.
 struct WriterStats {
   std::uint64_t write_calls = 0;  // WriteFully invocations, not short-write retries
   std::uint64_t sync_calls = 0;   // successful and failed SyncData calls on data
-  std::uint64_t batches = 0;      // acknowledgment units completed
+  std::uint64_t batches = 0;      // DURABLE acknowledgment units; always 0 under write_only
   std::uint64_t records_accepted = 0;
   std::uint64_t bytes_written = 0;
 };
@@ -93,6 +102,12 @@ class EventLogWriter {
   Result<BatchAppendResult> AppendBatchAndSync(
       std::span<const std::span<const std::byte>> payloads);
 
+  // Appends one record and returns without calling the durability barrier. Requires
+  // policy kWriteOnly. Nothing is acknowledged durable, ever: durable_through_sequence()
+  // stays 0 for the life of this writer. Diagnostic only, for measuring what the barrier
+  // costs (ADR-008). A failed write is still terminal (ADR-003).
+  Result<AcceptResult> AppendWithoutSync(std::span<const std::byte> payload);
+
   std::uint64_t durable_through_sequence() const { return durable_through_; }
   std::uint64_t accepted_through_sequence() const { return accepted_through_; }
   std::uint64_t file_offset() const { return file_offset_; }
@@ -112,13 +127,16 @@ class EventLogWriter {
         policy_(policy),
         batch_size_(batch_size),
         accepted_through_(last_sequence),
-        durable_through_(last_sequence),
+        // write_only makes no durability claim, so a resumed prefix is not one either.
+        durable_through_(policy == SyncPolicy::kWriteOnly ? 0 : last_sequence),
         file_offset_(file_offset) {}
 
   // Shared preconditions for both append paths: open, not terminal, sequence space left.
   Status CheckWritable(std::uint64_t records) const;
-  // Writes `encode_buffer_` and syncs it once, advancing the acknowledgment on success.
+  // Writes `encode_buffer_`, advancing acceptance but never durability.
   // `last_sequence` is the highest sequence the buffer contains.
+  Status WriteBuffer(std::uint64_t last_sequence, std::uint64_t record_count);
+  // WriteBuffer followed by one barrier call, advancing the acknowledgment on success.
   Status WriteAndSyncBuffer(std::uint64_t last_sequence, std::uint64_t record_count);
 
   FileDescriptor fd_;

@@ -99,3 +99,10 @@ correctness claim"; §3 says it "can report `accepted_through_sequence` but neve
 therefore rejects the policy in its scenario parser (ADR-007), which is the documented contract
 applied rather than a new decision. The open question stands for M4 planning and nothing in M3
 depends on it.
+
+**M4 followed the documented ordering (2026-11-12).** `docs/PLAN.md` already placed `write_only` in
+M4 — the milestone that needs a non-durable baseline to compare against — so M4 implemented it
+there rather than re-asking. Its shape is fixed by ADR-008: a separate method returning a type with
+no durability field, no barrier call anywhere including on a resumed log, and continued exclusion
+from the crash harness. If a different ordering was intended, this is the decision to revisit; the
+policy can be refused at `Open` again without touching anything else.

@@ -31,12 +31,10 @@ Result<SyncPolicy> ParseSyncPolicy(std::string_view name) {
 
 Result<EventLogWriter> EventLogWriter::Open(const std::filesystem::path& path,
                                             const WriterOptions& options) {
-  // write_only is rejected here rather than silently degraded, so no code path can
-  // report an unimplemented policy's result as durable (docs/PLAN.md scope boundary).
-  if (options.policy == SyncPolicy::kWriteOnly) {
-    return Error(ErrorKind::kUnsupportedPolicy,
-                 "write_only is not implemented yet; it arrives with the M4 benchmark, where "
-                 "it reports accepted records and never calls them durable");
+  if (options.policy == SyncPolicy::kWriteOnly && options.batch_size != 1) {
+    // write_only has no acknowledgment unit to size, so a batch size would describe
+    // nothing (ADR-008).
+    return Error(ErrorKind::kInvalidArgument, "write_only requires batch-size 1");
   }
   if (options.policy == SyncPolicy::kSyncEach && options.batch_size != 1) {
     return Error(ErrorKind::kInvalidArgument, "sync_each requires batch-size 1");
@@ -98,18 +96,23 @@ Result<EventLogWriter> EventLogWriter::Open(const std::filesystem::path& path,
 
     // The scan proves those records are present and structurally complete. It does not
     // prove any of them was ever synced: a previous writer may have been killed between
-    // write() and SyncData, or (from M4) have run a non-durable policy. Presence is not
-    // durability, so this session establishes it with one sync rather than inheriting a
-    // claim it cannot check (ADR-001). Only after this does durable_through_ start at
-    // last_sequence.
-    Status resumed = ops->SyncData(file.fd.get());
-    if (!resumed.ok()) {
-      return Error(ErrorKind::kUnknownDurability,
-                   std::string(SyncPrimitiveName()) + " failed while resuming " + path.string() +
-                       "; whether its " + std::to_string(scan.value().valid_records) +
-                       " existing records are durable is unknown (" + resumed.error().message() +
-                       ")",
-                   resumed.error().errno_value());
+    // write() and SyncData, or have run write_only. Presence is not durability, so this
+    // session establishes it with one sync rather than inheriting a claim it cannot check
+    // (ADR-001). Only after this does durable_through_ start at last_sequence.
+    //
+    // write_only is exempt because it claims nothing: syncing here would make this policy
+    // call the barrier, which is the one thing it is defined not to do. Its
+    // durable_through_sequence() stays 0 instead (ADR-008).
+    if (options.policy != SyncPolicy::kWriteOnly) {
+      Status resumed = ops->SyncData(file.fd.get());
+      if (!resumed.ok()) {
+        return Error(ErrorKind::kUnknownDurability,
+                     std::string(SyncPrimitiveName()) + " failed while resuming " + path.string() +
+                         "; whether its " + std::to_string(scan.value().valid_records) +
+                         " existing records are durable is unknown (" + resumed.error().message() +
+                         ")",
+                     resumed.error().errno_value());
+      }
     }
   }
 
@@ -137,13 +140,10 @@ Status EventLogWriter::CheckWritable(std::uint64_t records) const {
   return Status::Ok();
 }
 
-// One write, one sync, then the acknowledgment. Both failure paths are terminal and
-// neither acknowledges anything, which is what makes the batch an all-or-nothing unit.
-Status EventLogWriter::WriteAndSyncBuffer(std::uint64_t last_sequence, std::uint64_t record_count) {
-  const std::uint64_t record_offset = file_offset_;
-
+// Acceptance only: the bytes were handed to write(2) and nothing more is claimed.
+Status EventLogWriter::WriteBuffer(std::uint64_t last_sequence, std::uint64_t record_count) {
   ++stats_.write_calls;
-  Status written = WriteFully(*ops_, fd_.get(), encode_buffer_, record_offset);
+  Status written = WriteFully(*ops_, fd_.get(), encode_buffer_, file_offset_);
   if (!written.ok()) {
     // Some bytes may have landed. Whatever is on disk is a strict prefix of this write,
     // so the log now ends in a recoverable incomplete tail -- or, mid-batch, in whole
@@ -153,10 +153,20 @@ Status EventLogWriter::WriteAndSyncBuffer(std::uint64_t last_sequence, std::uint
     return written;
   }
 
-  file_offset_ = record_offset + encode_buffer_.size();
+  file_offset_ += encode_buffer_.size();
   accepted_through_ = last_sequence;
   stats_.records_accepted += record_count;
   stats_.bytes_written += encode_buffer_.size();
+  return Status::Ok();
+}
+
+// One write, one sync, then the acknowledgment. Both failure paths are terminal and
+// neither acknowledges anything, which is what makes the batch an all-or-nothing unit.
+Status EventLogWriter::WriteAndSyncBuffer(std::uint64_t last_sequence, std::uint64_t record_count) {
+  const std::uint64_t record_offset = file_offset_;
+
+  Status written = WriteBuffer(last_sequence, record_count);
+  if (!written.ok()) return written;
 
   ++stats_.sync_calls;
   Status synced = ops_->SyncData(fd_.get());
@@ -253,6 +263,32 @@ Result<BatchAppendResult> EventLogWriter::AppendBatchAndSync(
   Status done = WriteAndSyncBuffer(last_sequence, payloads.size());
   if (!done.ok()) return done.error();
   return BatchAppendResult{first_sequence, last_sequence, payloads.size(), durable_through_};
+}
+
+Result<AcceptResult> EventLogWriter::AppendWithoutSync(std::span<const std::byte> payload) {
+  if (policy_ != SyncPolicy::kWriteOnly) {
+    return Error(ErrorKind::kUnsupportedPolicy,
+                 "this writer's policy is " + std::string(SyncPolicyName(policy_)) +
+                     "; AppendWithoutSync requires write_only, so a result's type always says "
+                     "whether a durability claim exists (ADR-008)");
+  }
+  Status writable = CheckWritable(1);
+  if (!writable.ok()) return writable.error();
+  if (payload.size() > kMaxPayloadBytes) {
+    return Error(ErrorKind::kLimitExceeded, "payload is " + std::to_string(payload.size()) +
+                                                " bytes; the v1 limit is " +
+                                                std::to_string(kMaxPayloadBytes));
+  }
+
+  const std::uint64_t sequence = accepted_through_ + 1;
+  Status encoded = EncodeRecordInto(encode_buffer_, sequence, payload);
+  if (!encoded.ok()) return encoded.error();
+
+  // No barrier call, so stats_.batches and durable_through_ are both left alone. They
+  // stay 0 for this writer's whole life, which is the point of the policy.
+  Status done = WriteBuffer(sequence, 1);
+  if (!done.ok()) return done.error();
+  return AcceptResult{sequence, accepted_through_};
 }
 
 Status EventLogWriter::Close() {

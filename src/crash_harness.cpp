@@ -19,6 +19,7 @@
 
 #include "eventlog/payload.h"
 #include "eventlog/recover.h"
+#include "eventlog/scratch_dir.h"
 
 namespace eventlog {
 namespace {
@@ -200,26 +201,6 @@ class FrameStream {
  private:
   int fd_ = -1;
   std::string buffer_;
-};
-
-// Removes only the directory it was given, which the harness created itself.
-class ScratchDirectory {
- public:
-  explicit ScratchDirectory(std::filesystem::path path) : path_(std::move(path)) {}
-  ~ScratchDirectory() {
-    if (keep_) return;
-    std::error_code ec;
-    std::filesystem::remove_all(path_, ec);
-  }
-  ScratchDirectory(const ScratchDirectory&) = delete;
-  ScratchDirectory& operator=(const ScratchDirectory&) = delete;
-
-  // Leaves a failing run's logs on disk, where the scenario spec can be replayed.
-  void Keep() { keep_ = true; }
-
- private:
-  std::filesystem::path path_;
-  bool keep_ = false;
 };
 
 bool StartsWith(const std::string& text, std::string_view prefix) {
@@ -774,34 +755,18 @@ Result<CrashTestSummary> RunCrashTest(const CrashTestOptions& options) {
                  "crash-test needs the path of this executable to re-execute");
   }
 
-  std::error_code ec;
-  // The harness creates and deletes files, so it must not be aimed through a symlink
-  // (docs/PRD.md section 6).
-  if (std::filesystem::is_symlink(options.workdir, ec)) {
-    return Error(ErrorKind::kInvalidArgument,
-                 options.workdir.string() +
-                     " is a symlink; refusing to use it as a crash-test scratch root");
-  }
-  std::filesystem::create_directories(options.workdir, ec);
-  if (ec) {
-    return Error(ErrorKind::kIo, "could not create " + options.workdir.string(), ec.value());
-  }
-
   // One fresh subdirectory per invocation. Every fixture lives inside it, and only it is
   // removed afterwards: the scratch root itself belongs to the caller.
-  const std::filesystem::path run_dir = options.workdir / ("run-" + std::to_string(::getpid()) +
-                                                           "-seed" + std::to_string(options.seed));
-  if (!std::filesystem::create_directory(run_dir, ec) || ec) {
-    return Error(ErrorKind::kInvalidArgument,
-                 "could not create a fresh run directory at " + run_dir.string());
-  }
-  ScratchDirectory scratch(run_dir);
+  ScratchDirectory scratch;
+  Status created = scratch.Create(options.workdir, "run", "seed" + std::to_string(options.seed));
+  if (!created.ok()) return created.error();
+  std::error_code ec;
 
   CrashTestSummary summary;
   std::uint64_t rng = options.seed;
   for (std::uint64_t index = 0; index < options.runs; ++index) {
     const CrashScenario scenario = MakeScenario(rng, index, options.forced_checkpoint);
-    const std::filesystem::path log = run_dir / ("scenario-" + std::to_string(index) + ".log");
+    const std::filesystem::path log = scratch.file("scenario-" + std::to_string(index) + ".log");
 
     Result<RunOutcome> run = RunOneScenario(scenario, log, options.child_program);
     if (!run.ok()) {

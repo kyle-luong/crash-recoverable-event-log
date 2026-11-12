@@ -27,7 +27,12 @@ if(EVENTLOG_SANITIZERS)
   target_compile_options(eventlog_flags INTERFACE
     -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g)
   target_link_options(eventlog_flags INTERFACE -fsanitize=address,undefined)
+  # `bench` reports this, so a sanitizer build can never be mistaken for a measurement.
+  target_compile_definitions(eventlog_flags INTERFACE EVENTLOG_SANITIZERS_ON=1)
 endif()
+
+# Also reported with every benchmark result (CPP-T17).
+target_compile_definitions(eventlog_flags INTERFACE EVENTLOG_BUILD_TYPE="$<CONFIG>")
 
 add_library(eventlog_core STATIC
   src/error.cpp
@@ -38,7 +43,9 @@ add_library(eventlog_core STATIC
   src/reader.cpp
   src/recover.cpp
   src/payload.cpp
-  src/crash_harness.cpp)
+  src/scratch_dir.cpp
+  src/crash_harness.cpp
+  src/benchmark.cpp)
 target_include_directories(eventlog_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(eventlog_core PUBLIC eventlog_flags)
 
@@ -47,7 +54,7 @@ target_link_libraries(eventlog PRIVATE eventlog_core)
 
 enable_testing()
 
-set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_batch test_reader test_recovery test_crash)
+set(EVENTLOG_TEST_SUITES test_scaffold test_crc32c test_codec test_writer test_batch test_reader test_recovery test_crash test_bench)
 foreach(suite IN LISTS EVENTLOG_TEST_SUITES)
   add_executable(${suite} tests/${suite}.cpp)
   target_link_libraries(${suite} PRIVATE eventlog_core)

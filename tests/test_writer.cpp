@@ -267,8 +267,8 @@ TEST(ContinuesSequenceNumberingOnExistingLog) {
 
 // Resuming a log must not infer durability from the records merely being present. The
 // scan reads through the page cache, so it cannot distinguish a prefix that was synced
-// from one written by a writer that died before its sync (or, from M4, from a
-// deliberately non-durable policy). Open establishes the claim with one sync instead.
+// from one written by a writer that died before its sync, or from a write_only writer,
+// which never syncs at all. Open establishes the claim with one sync instead.
 TEST(ResumeSyncsTheExistingPrefix) {
   const test::TempDir dir("writer-resume-sync");
   const auto path = dir.file("events.log");
@@ -369,23 +369,96 @@ TEST(RejectsOversizedPayload) {
   EL_EXPECT_STATUS_OK(writer.Close());
 }
 
-TEST(UnimplementedPoliciesAreRejectedAtOpen) {
+TEST(EveryPolicyOpensWithTheBatchSizeItCanDescribe) {
   const test::TempDir dir("writer-policy");
 
-  // write_only lands with the M4 benchmark. Until then it must not open at all, so no
-  // code path can report a non-durable policy's result as durable.
-  WriterOptions write_only;
-  write_only.policy = SyncPolicy::kWriteOnly;
-  EL_EXPECT_ERROR(EventLogWriter::Open(dir.file("b.log"), write_only),
-                  ErrorKind::kUnsupportedPolicy);
-
-  // sync_batch is implemented as of M2 and opens.
   WriterOptions batch;
   batch.policy = SyncPolicy::kSyncBatch;
   batch.batch_size = 16;
   EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(dir.file("a.log"), batch));
   EL_CHECK(writer.policy() == SyncPolicy::kSyncBatch);
   EL_CHECK_EQ(writer.batch_size(), std::size_t{16});
+  EL_EXPECT_STATUS_OK(writer.Close());
+
+  // write_only has no acknowledgment unit, so a batch size would describe nothing.
+  WriterOptions write_only;
+  write_only.policy = SyncPolicy::kWriteOnly;
+  write_only.batch_size = 16;
+  EL_EXPECT_ERROR(EventLogWriter::Open(dir.file("b.log"), write_only), ErrorKind::kInvalidArgument);
+  write_only.batch_size = 1;
+  EventLogWriter accepted = EL_EXPECT_OK(EventLogWriter::Open(dir.file("c.log"), write_only));
+  EL_CHECK(accepted.policy() == SyncPolicy::kWriteOnly);
+  EL_EXPECT_STATUS_OK(accepted.Close());
+}
+
+// ADR-008: a result's type says whether a durability claim exists. The method and the
+// policy must agree, so no caller can read a durable sequence out of a write_only run or
+// an accepted-only one out of a durable policy.
+TEST(WriteOnlyAcceptsRecordsAndNeverCallsThemDurable) {
+  const test::TempDir dir("writer-write-only");
+  const auto path = dir.file("accepted.log");
+  auto ops = std::make_shared<ScriptedFileOps>();
+
+  WriterOptions options;
+  options.policy = SyncPolicy::kWriteOnly;
+  options.file_ops = ops;
+  EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
+
+  for (std::uint64_t i = 1; i <= 5; ++i) {
+    const AcceptResult result = EL_EXPECT_OK(writer.AppendWithoutSync(Payload(32)));
+    EL_CHECK_EQ(result.sequence, i);
+    EL_CHECK_EQ(result.accepted_through_sequence, i);
+    // The durable side never moves, not even by one.
+    EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{0});
+  }
+
+  // The barrier was never called, and no acknowledgment unit was ever completed.
+  EL_CHECK_EQ(writer.stats().sync_calls, std::uint64_t{0});
+  EL_CHECK_EQ(writer.stats().batches, std::uint64_t{0});
+  EL_CHECK_EQ(writer.stats().records_accepted, std::uint64_t{5});
+  EL_CHECK_EQ(ops->sync_calls, std::uint64_t{0});
+
+  // The durable methods are refused under this policy, and vice versa.
+  EL_EXPECT_ERROR(writer.AppendAndSync(Payload(32)), ErrorKind::kUnsupportedPolicy);
+  EL_EXPECT_STATUS_OK(writer.Close());
+
+  // The bytes are a correct log all the same: write_only changes when the barrier is
+  // called, never what is written.
+  const ScanReport report = EL_EXPECT_OK(ScanLog(path));
+  EL_CHECK_EQ(report.valid_records, std::uint64_t{5});
+  EL_CHECK(report.clean());
+}
+
+TEST(WriteOnlyIsRefusedByTheDurablePolicies) {
+  const test::TempDir dir("writer-write-only-guard");
+  EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(dir.file("a.log"), WriterOptions{}));
+  EL_EXPECT_ERROR(writer.AppendWithoutSync(Payload(8)), ErrorKind::kUnsupportedPolicy);
+  EL_EXPECT_STATUS_OK(writer.Close());
+}
+
+// Resuming under write_only must not call the barrier -- that is the one thing the policy
+// is defined not to do -- so it inherits no durability claim either.
+TEST(WriteOnlyResumesWithoutSyncingOrClaimingDurability) {
+  const test::TempDir dir("writer-write-only-resume");
+  const auto path = dir.file("resume.log");
+  {
+    EventLogWriter durable = EL_EXPECT_OK(EventLogWriter::Open(path, WriterOptions{}));
+    EL_EXPECT_OK(durable.AppendAndSync(Payload(16)));
+    EL_EXPECT_OK(durable.AppendAndSync(Payload(16)));
+    EL_EXPECT_STATUS_OK(durable.Close());
+  }
+
+  auto ops = std::make_shared<ScriptedFileOps>();
+  WriterOptions options;
+  options.policy = SyncPolicy::kWriteOnly;
+  options.allow_existing = true;
+  options.file_ops = ops;
+  EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
+  EL_CHECK_EQ(ops->sync_calls, std::uint64_t{0});
+  EL_CHECK_EQ(writer.accepted_through_sequence(), std::uint64_t{2});
+  EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{0});
+  EL_CHECK_EQ(EL_EXPECT_OK(writer.AppendWithoutSync(Payload(16))).sequence, std::uint64_t{3});
+  EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{0});
   EL_EXPECT_STATUS_OK(writer.Close());
 }
 

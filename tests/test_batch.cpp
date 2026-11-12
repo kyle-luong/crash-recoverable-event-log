@@ -74,7 +74,7 @@ TEST(BatchAcknowledgesEveryRecordTogether) {
 
 // The point of batching, stated as an assertion instead of a timing claim: one write and
 // one sync for a batch of 32, where sync_each needs 32 of each for the same records.
-// Measured throughput is milestone M4; this only pins the syscall ratio.
+// This pins the syscall ratio only. Timing belongs to the benchmark, never to this suite.
 TEST(BatchSpendsOneSyncWhereSyncEachSpendsThirtyTwo) {
   const test::TempDir dir("batch-syscall-ratio");
 

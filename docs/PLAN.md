@@ -12,7 +12,7 @@ its command passes from a clean build directory **on Linux** — the supported p
 | **M1** | CPP-01…04 | Record codec + CRC32C, `sync_each` writer with advisory lock, log scanner, incomplete-tail recovery, `append`/`verify`/`recover` CLI | `./scripts/verify-linux.sh` | done |
 | **M2** | CPP-05, CPP-06 | `append_batch_and_sync` with whole-batch ack boundaries (ADR-006); shared `FileOps` fault injection (short write, `EINTR`, `EIO`, failed sync) driving batch and recovery cases | `./scripts/verify-linux.sh` (170 cases, 8 suites) | done |
 | **M3** | CPP-07 | Subprocess supervisor, `SIGKILL` at instrumented checkpoints, independent ack oracle, acknowledged-prefix invariant over many runs (ADR-007) | `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0, inside `./scripts/verify-linux.sh` | done |
-| **M4** | CPP-08 | Release benchmark: workload generator, records/sec, p50/p95/p99 durable-ack latency, environment capture, JSON output | `eventlog bench --trials 5 --out out/results.json`, reviewed against `benchmarks/README.md` methodology | todo |
+| **M4** | CPP-08 | Release benchmark: workload generator, records/sec, p50/p95/p99 durable-ack latency, environment capture, JSON output; `write_only` as the non-durable baseline (ADR-008) | `eventlog bench --trials 5 --out out/results.json`, reviewed against `benchmarks/README.md` methodology | done |
 | **M5** | CPP-09 | Harden and release: full sanitizer sweep, CLI bounds and destructive-op guards, honest README with measured sample output | `./scripts/verify-linux.sh` + manual README review against PRD §5 | todo |
 
 M2 and M3 are sequenced before M4 deliberately, per PRD §7: "never introduce [batch optimization]
@@ -37,7 +37,7 @@ must not be described as satisfied.
 | CPP-AC10 | `test_crash` oracle negative controls (lost acknowledgment, flipped byte in a complete record, sequence gap, fabricated payload, tail from a clean exit); `cli_tests.sh` kill matrix at all six checkpoints, plus a stand-in child whose false acknowledgment must be reported | M3 |
 | CPP-AC11 | `test_crash` accepts records recovered but never acknowledged; `cli_tests.sh` requires a nonzero extra count at `after_write_before_sync` and `after_sync_before_ack`, and zero at `before_write` and `after_ack` | M3 |
 | CPP-AC12 | `cli_tests.sh` bounds, overwrite refusal, symlink refusal | M1 (extended in M5) |
-| CPP-AC13 | — | M4 |
+| CPP-AC13 | `test_bench` percentile and spread statistics, per-policy barrier-call counts, equal-workload checks, bounds, and the publishability stamp; `cli_tests.sh` report contents and overwrite/symlink guards; `benchmarks/RESULTS.md` holds a measured Release run with its full environment | M4 |
 | CPP-AC14 | ASan + UBSan Debug build is the default `verify.sh` path; `-Werror` under both GCC 12 (Linux) and Apple clang | M1 (full sweep M5) |
 | CPP-AC15 | `cli_tests.sh` file-hash-unchanged check across `verify` and `recover` without the flag | M1 |
 | CPP-AC16 | README guarantee-boundaries section, reviewed against PRD §1 | M5 |
@@ -57,9 +57,12 @@ acknowledgment oracle, harness-owned recovery of a torn tail, and the `crash-tes
 handling in process, and process termination tests the acknowledgment boundary across a death.
 Controlled kill timing only — a parked child killed at a known point, not a race.
 
-Out of scope, by decision: benchmarks, `write_only`, concurrent writers, mid-log repair, and
-compaction. `SyncPolicy::kWriteOnly` exists in the enum but is rejected at `Open` and by the
-crash-test scenario parser, so no code path can report a non-durable policy's result as durable or
-fold it into the acknowledged-prefix claim. **No throughput or latency number is measured or
-claimed before M4.** The syscall counts `WriterStats` exposes are counts, not timings, and the
-README says so.
+**M4.** In scope: the `bench` command, the four-policy comparison fixed by
+`benchmarks/README.md` step 6, the statistics it reports, the environment it captures, and
+`write_only` as the non-durable baseline that comparison needs (ADR-008). A report states whether
+it may be quoted; `write_only` carries no durability field at all and stays excluded from the
+acknowledged-prefix claim.
+
+Out of scope, by decision: concurrent writers, mid-log repair, and compaction. Benchmarks are
+reports, not CI gates: the suite exercises the benchmark with tiny workloads and asserts syscall
+counts and report structure, never a duration.

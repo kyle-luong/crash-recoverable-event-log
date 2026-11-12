@@ -7,12 +7,14 @@ durable before the process died?*
 This is not a database, a queue, or a distributed log. It is one local file, one writer, a
 checksummed record format, and a recovery path that refuses to guess.
 
-**Status:** milestones M1–M3 complete — record format, `sync_each` and `sync_batch` writers, log
-verification, incomplete-tail recovery, fault injection over the syscall boundary, and the
-process-crash harness that kills a writer at instrumented checkpoints and checks the recovered log
-against independently observed acknowledgments. Benchmarks are specified and not yet built; see
-[docs/PLAN.md](docs/PLAN.md). No performance numbers are claimed anywhere in this repository,
-because none have been measured yet.
+**Status:** milestones M1–M4 complete — record format, `sync_each` and `sync_batch` writers, log
+verification, incomplete-tail recovery, fault injection over the syscall boundary, the process-crash
+harness that kills a writer at instrumented checkpoints and checks the recovered log against
+independently observed acknowledgments, and a Release benchmark comparing the durable policies
+against a non-durable baseline. Measured results, with the environment they came from, are in
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md); every figure in this repository comes from a run
+recorded there, and a report built with sanitizers or off the supported platform marks itself
+unpublishable rather than looking like a result.
 
 ## Build
 
@@ -111,6 +113,26 @@ that nobody was ever told were durable. That is correct and expected — the inv
 one-directional. The reverse, a single acknowledged record missing from a recovered log, is a
 violation and fails the run.
 
+Compare what durability costs:
+
+```console
+$ eventlog bench --records 10000 --payload-bytes 64 --trials 5 --out out/results-64.json
+Policy          records/sec       ack p50/p95/p99 (us)        vs baseline
+sync_each       934.9             1254.0 / 2963.6 / 3495.9    1.00x
+sync_batch(16)  13466.5           1361.2 / 3105.9 / 5163.7    14.40x
+sync_batch(64)  32808.7           1509.6 / 3421.6 / 4773.1    35.09x
+write_only      2598153.0         0.4 / 0.4 / 0.7 *           2779.06x
+* accepted, not durable: time to accept a record. This policy never calls the barrier,
+  so durable-ack latency does not apply to it.
+Median of 5 trials, 10000 records of 64 payload bytes each. Barrier: fdatasync. Build: Release.
+```
+
+A real Release run on Linux, reproduced from `benchmarks/results-64.json`. Read
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md) before taking any of those multipliers seriously:
+the durable policies varied by up to 4.3× between trials on that machine, which is a virtual one.
+A build with sanitizers on, or off Linux, prints a `WARNING` banner above the table and stamps
+`"publishable": false` into the JSON instead of looking like this.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -164,9 +186,22 @@ partial batch to resolve and the boundary never depends on how the process exits
 **What batching costs you.** A larger batch is more unacknowledged work in flight to lose if the
 process dies. What it buys is syscalls, and that part is checked by assertion rather than asserted
 in prose: for 32 records, `sync_batch(32)` performs exactly one write and one barrier call where
-`sync_each` performs thirty-two of each, and both produce byte-identical files. Whether fewer
-barrier calls translate into proportionally more throughput is a measurement, not a deduction, and
-it belongs to M4 — so no speedup is claimed here.
+`sync_each` performs thirty-two of each, and both produce byte-identical files.
+
+Whether fewer barrier calls translate into proportionally more throughput is a measurement, not a
+deduction — and measured, they do not. On the machine recorded in
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md), batching bought between 9× and 85× the `sync_each`
+throughput, which is large but short of the batch size: amortising a barrier is not removing it.
+Per-acknowledgment latency did not improve and often worsened, because one acknowledgment now
+covers N records. Those runs also varied by up to 4.3× between trials of the same workload, so they
+bound an order of magnitude rather than pin a multiplier, and the results file says so before it
+shows a number.
+
+**`write_only` is the floor, not a policy.** It never calls the barrier, reports
+`Accepted (NOT durable)`, and carries no durable sequence in its result type at all
+([ADR-008](docs/decisions/ADR-008-write-only-and-benchmark-honesty.md)). It exists to measure what
+durability costs and is excluded from the acknowledged-prefix claim by construction — the crash
+harness refuses to run it. Do not store anything with it.
 
 **A failed sync ends the writer session** ([ADR-003](docs/decisions/ADR-003-sync-failure-is-terminal.md)).
 On Linux a failed `fsync` can discard the dirty page and report the error only once, so retrying
@@ -237,7 +272,7 @@ bytes for any record.
 ```
 include/eventlog/   public headers (error, record, crc32c, file_ops, writer, reader, recover)
 src/                implementation; file_ops.cpp is the only POSIX boundary
-tests/              8 C++ suites plus a CLI integration suite
+tests/              9 C++ suites plus a CLI integration suite
 docs/PRD.md         the product contract
 docs/PLAN.md        milestones, with the verification command for each
 docs/STATUS.md      current state and next action
@@ -259,8 +294,11 @@ test_batch     whole-batch acknowledgment, failed batch write and sync, syscall 
 test_reader    1000-record round-trip byte-for-byte, scan report accuracy
 test_recovery  every byte offset of a trailing record, mid-log corruption, sequence violations
 test_crash     the acknowledged-prefix oracle, against logs damaged on purpose
+test_bench     percentiles and spread, per-policy barrier counts, equal workloads,
+               bounds, and the stamp that disqualifies an unpublishable report
 cli_tests      exit codes, argument bounds, read-only verify, destructive-operation
-               guards, and the kill matrix at all six crash-test checkpoints
+               guards, the kill matrix at all six crash-test checkpoints, and the
+               contents of a benchmark report
 ```
 
 The recovery suite cuts a trailing record at **every** byte offset and checks that each cut is

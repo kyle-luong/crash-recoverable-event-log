@@ -14,9 +14,11 @@
 #include <system_error>
 #include <vector>
 
+#include "eventlog/benchmark.h"
 #include "eventlog/crash_test.h"
 #include "eventlog/error.h"
 #include "eventlog/file_ops.h"
+#include "eventlog/json.h"
 #include "eventlog/payload.h"
 #include "eventlog/reader.h"
 #include "eventlog/recover.h"
@@ -33,13 +35,15 @@ void PrintUsage(std::ostream& out) {
 
 Usage:
   eventlog append  --file PATH --records N --payload-bytes B
-                   [--policy sync_each|sync_batch] [--batch-size N]
+                   [--policy sync_each|sync_batch|write_only] [--batch-size N]
                    [--append-existing | --overwrite]
   eventlog verify  --file PATH [--json PATH]
   eventlog recover --file PATH [--truncate-tail]
   eventlog crash-test --workdir DIR [--runs N] [--seed N] [--scenario NAME]
                       [--child-program PATH]
   eventlog crash-child LOG SCENARIO-SPEC
+  eventlog bench   --out PATH [--records N] [--payload-bytes B] [--trials T]
+                   [--workdir DIR] [--overwrite]
   eventlog --help | --version
 
 Commands:
@@ -48,6 +52,9 @@ Commands:
             sync_each syncs every record. sync_batch writes --batch-size
             records as one write, syncs once, and acknowledges that whole
             batch together; a batch that fails acknowledges none of itself.
+            write_only never calls the barrier at all: its records are
+            ACCEPTED and never durable. It exists to measure what durability
+            costs, and must not be used to store anything.
   verify    Read-only. Validates framing, CRC32C, and the sequence chain.
             Exit 0 clean, 1 incomplete trailing record, 2 hard corruption.
   recover   Reports a structurally incomplete trailing record. Truncates it only
@@ -71,14 +78,18 @@ Commands:
             The instrumented writer crash-test spawns. Not useful on its
             own: it reports acknowledgments on stdout and stops itself at
             the checkpoint its scenario spec names, waiting to be killed.
+  bench     Compares sync_each, sync_batch(16), sync_batch(64) and
+            write_only on an identical workload, over --trials repetitions
+            with a fresh file each time, and writes a JSON report to --out.
+            Reports the median and range across trials, never the best run.
+            A build that is not Release-without-sanitizers on Linux is
+            marked NOT publishable in both the table and the JSON.
 
 Durability: a record counts as durable only after this platform's barrier
 ()" << SyncPrimitiveName()
       << R"() returns success. A process kill is not a power failure, so
 crash-test proves the acknowledgment contract for the process-crash and
 injected-fault model and nothing wider.
-
-Planned in a later milestone: bench and write_only (M4).
 )";
 }
 
@@ -163,40 +174,6 @@ int FailUsage(const Error& error) {
   return kExitUsage;
 }
 
-std::string JsonEscape(std::string_view in) {
-  std::string out;
-  out.reserve(in.size() + 8);
-  for (const char c : in) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          out += "\\u00";
-          const char* digits = "0123456789abcdef";
-          out += digits[(static_cast<unsigned char>(c) >> 4) & 0xF];
-          out += digits[static_cast<unsigned char>(c) & 0xF];
-        } else {
-          out += c;
-        }
-    }
-  }
-  return out;
-}
-
 // --- append ------------------------------------------------------------------
 
 int CommandAppend(int argc, char** argv) {
@@ -276,6 +253,7 @@ int CommandAppend(int argc, char** argv) {
   const auto report_failure = [&](const Error& error) {
     std::cerr << "error: " << error.message() << "\n";
     std::cerr << "Records appended: " << appended
+              << "  Accepted through: " << writer.accepted_through_sequence()
               << "  Durable acknowledged: " << writer.durable_through_sequence() << "\n";
     // Close is still attempted so the lock is released and errors are not hidden.
     Status closed = writer.Close();
@@ -297,6 +275,9 @@ int CommandAppend(int argc, char** argv) {
     if (options.policy == SyncPolicy::kSyncBatch) {
       Result<BatchAppendResult> result = writer.AppendBatchAndSync(spans);
       if (!result.ok()) return report_failure(result.error());
+    } else if (options.policy == SyncPolicy::kWriteOnly) {
+      Result<AcceptResult> result = writer.AppendWithoutSync(spans[0]);
+      if (!result.ok()) return report_failure(result.error());
     } else {
       Result<AppendResult> result = writer.AppendAndSync(spans[0]);
       if (!result.ok()) return report_failure(result.error());
@@ -310,7 +291,17 @@ int CommandAppend(int argc, char** argv) {
   Status closed = writer.Close();
   if (!closed.ok()) return Fail(closed.error(), kExitRuntimeError);
 
-  std::cout << "Records appended: " << appended << "  Durable acknowledged: " << durable << "\n";
+  if (options.policy == SyncPolicy::kWriteOnly) {
+    // docs/PRD.md section 2: this policy's result must not carry the same acknowledgment
+    // status as a synchronized one. It reports acceptance, and says what that is worth.
+    std::cout << "Records appended: " << appended
+              << "  Accepted (NOT durable): " << writer.accepted_through_sequence() << "\n";
+    std::cout << "This policy never calls " << SyncPrimitiveName()
+              << ", so nothing above is acknowledged durable and a crash may lose any of "
+                 "it.\n";
+  } else {
+    std::cout << "Records appended: " << appended << "  Durable acknowledged: " << durable << "\n";
+  }
   std::cout << "Policy: " << SyncPolicyName(options.policy);
   if (options.policy == SyncPolicy::kSyncBatch) std::cout << "(" << group << ")";
   std::cout << "  Durability barrier: " << SyncPrimitiveName() << "  File size: " << bytes
@@ -534,11 +525,76 @@ int CommandCrashChild(int argc, char** argv) {
   return RunCrashChild(std::filesystem::path(argv[2]), scenario.value(), STDOUT_FILENO);
 }
 
-int NotYetImplemented(std::string_view command, std::string_view milestone) {
-  std::cerr << "error: " << command << " is planned for milestone " << milestone
-            << " and is not implemented yet.\n"
-            << "See docs/PLAN.md for the milestone plan.\n";
-  return kExitUsage;
+// --- bench --------------------------------------------------------------------
+
+int CommandBench(int argc, char** argv) {
+  Arguments args;
+  Status parsed = args.Parse(
+      argc, argv, 2, {"records", "payload-bytes", "trials", "out", "workdir"}, {"overwrite"});
+  if (!parsed.ok()) return FailUsage(parsed.error());
+
+  if (!args.has_value("out")) {
+    return FailUsage(Error(ErrorKind::kInvalidArgument,
+                           "--out is required: a benchmark that is not recorded is not a result"));
+  }
+  const std::filesystem::path out(args.value("out"));
+
+  BenchmarkOptions options;
+  if (args.has_value("records")) {
+    Result<std::uint64_t> records = args.required_u64("records", kMaxRecordsPerInvocation);
+    if (!records.ok()) return FailUsage(records.error());
+    options.records = records.value();
+  }
+  if (args.has_value("payload-bytes")) {
+    Result<std::uint64_t> payload = args.required_u64("payload-bytes", kMaxPayloadBytes);
+    if (!payload.ok()) return FailUsage(payload.error());
+    options.payload_bytes = static_cast<std::size_t>(payload.value());
+  }
+  if (args.has_value("trials")) {
+    Result<std::uint64_t> trials = args.required_u64("trials", kMaxBenchmarkTrials);
+    if (!trials.ok()) return FailUsage(trials.error());
+    options.trials = trials.value();
+  }
+
+  // Scratch defaults beside the report, which is where a caller already expects output.
+  options.workdir = args.has_value("workdir") ? std::filesystem::path(args.value("workdir"))
+                                              : (out.has_parent_path() && !out.parent_path().empty()
+                                                     ? out.parent_path()
+                                                     : std::filesystem::path("."));
+
+  // Writing the report is destructive if something is already there.
+  std::error_code ec;
+  if (std::filesystem::is_symlink(out, ec)) {
+    return Fail(Error(ErrorKind::kInvalidArgument,
+                      out.string() + " is a symlink; refusing to write a report through it"),
+                kExitRuntimeError);
+  }
+  const bool exists = std::filesystem::exists(out, ec);
+  if (exists && std::filesystem::file_size(out, ec) > 0 && !args.has_flag("overwrite")) {
+    return FailUsage(Error(ErrorKind::kInvalidArgument,
+                           out.string() + " already exists and is not empty; pass --overwrite to "
+                                          "replace it"));
+  }
+  std::filesystem::create_directories(options.workdir, ec);
+  if (ec) {
+    return Fail(Error(ErrorKind::kIo, "could not create " + options.workdir.string(), ec.value()),
+                kExitRuntimeError);
+  }
+
+  Result<BenchmarkReport> measured = RunBenchmark(options);
+  if (!measured.ok()) {
+    const bool usage = measured.error().kind() == ErrorKind::kInvalidArgument ||
+                       measured.error().kind() == ErrorKind::kLimitExceeded;
+    return usage ? FailUsage(measured.error()) : Fail(measured.error(), kExitRuntimeError);
+  }
+  const BenchmarkReport& report = measured.value();
+
+  Status written = WriteBenchmarkJson(out, report);
+  if (!written.ok()) return Fail(written.error(), kExitRuntimeError);
+
+  PrintBenchmarkTable(std::cout, report);
+  std::cout << "Report: " << out.string() << "\n";
+  return kExitOk;
 }
 
 }  // namespace
@@ -564,7 +620,7 @@ int RunCli(int argc, char** argv) {
   if (command == "recover") return CommandRecover(argc, argv);
   if (command == "crash-test") return CommandCrashTest(argc, argv);
   if (command == "crash-child") return CommandCrashChild(argc, argv);
-  if (command == "bench") return NotYetImplemented("bench", "M4");
+  if (command == "bench") return CommandBench(argc, argv);
 
   std::cerr << "error: unknown command \"" << command << "\"\n\n";
   PrintUsage(std::cerr);

@@ -1,0 +1,140 @@
+{
+  "schema": "eventlog-benchmark-v1",
+  "publishable": true,
+  "publishable_note": "Release build, sanitizers off, on the supported platform; see benchmarks/README.md",
+  "environment": {
+    "os": "Linux 6.10.14-linuxkit aarch64",
+    "cpu": "aarch64 (CPU implementer 0x61, part 0x000)",
+    "cpu_count": 10,
+    "ram_bytes": 8218034176,
+    "filesystem": "ext2/ext3/ext4",
+    "storage_class": "unknown",
+    "compiler": "12.2.0",
+    "build_type": "Release",
+    "sanitizers": false,
+    "durability_barrier": "fdatasync",
+    "load_average_1m": 1.76
+  },
+  "workload": {
+    "records": 10000,
+    "payload_bytes": 512,
+    "record_bytes": 536,
+    "trials": 5,
+    "payload_source": "deterministic SplitMix64 keyed by sequence number",
+    "file_per_trial": true
+  },
+  "units": {
+    "latency": "microseconds",
+    "throughput": "records per second, over time spent inside append calls",
+    "wall_seconds": "seconds, including deterministic payload generation",
+    "bytes": "bytes",
+    "peak_rss_bytes": "bytes, process-wide peak from getrusage",
+    "percentile_method": "nearest rank, no interpolation"
+  },
+  "policies": [
+    {
+      "label": "sync_each",
+      "policy": "sync_each",
+      "batch_size": 1,
+      "records_per_acknowledgment": 1,
+      "acknowledgment": "durable",
+      "durable_ack_latency_applicable": true,
+      "bytes_written": 5360000,
+      "peak_rss_bytes": 3219456,
+      "records_per_second": {"median": 867.154, "min": 633.998, "max": 1285.828},
+      "ack_latency_us": {
+        "p50": {"median": 414.250, "min": 309.250, "max": 1373.583},
+        "p95": {"median": 3295.500, "min": 1946.417, "max": 3426.416},
+        "p99": {"median": 7297.625, "min": 6371.000, "max": 7923.250}
+      },
+      "trials": [
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 10000, "append_seconds": 12.526174, "wall_seconds": 12.528715, "records_per_second": 798.328, "ack_p50_us": 614.209, "ack_p95_us": 3374.167, "ack_p99_us": 7703.459, "ack_max_us": 100786.375},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 10000, "append_seconds": 11.531978, "wall_seconds": 11.534278, "records_per_second": 867.154, "ack_p50_us": 414.250, "ack_p95_us": 3295.500, "ack_p99_us": 7297.625, "ack_max_us": 71904.166},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 10000, "append_seconds": 15.772927, "wall_seconds": 15.776031, "records_per_second": 633.998, "ack_p50_us": 1373.583, "ack_p95_us": 3426.416, "ack_p99_us": 7923.250, "ack_max_us": 713060.751},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 10000, "append_seconds": 9.473157, "wall_seconds": 9.475467, "records_per_second": 1055.614, "ack_p50_us": 316.625, "ack_p95_us": 2117.542, "ack_p99_us": 6371.000, "ack_max_us": 530783.042},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 10000, "append_seconds": 7.777087, "wall_seconds": 7.779334, "records_per_second": 1285.828, "ack_p50_us": 309.250, "ack_p95_us": 1946.417, "ack_p99_us": 6734.917, "ack_max_us": 342416.209}
+      ]
+    },
+    {
+      "label": "sync_batch(16)",
+      "policy": "sync_batch",
+      "batch_size": 16,
+      "records_per_acknowledgment": 16,
+      "acknowledgment": "durable",
+      "durable_ack_latency_applicable": true,
+      "bytes_written": 5360000,
+      "peak_rss_bytes": 3219456,
+      "records_per_second": {"median": 7959.223, "min": 4273.223, "max": 11021.236},
+      "ack_latency_us": {
+        "p50": {"median": 1630.375, "min": 1465.666, "max": 1772.167},
+        "p95": {"median": 3345.959, "min": 2829.542, "max": 8198.208},
+        "p99": {"median": 5279.792, "min": 4169.208, "max": 32089.417}
+      },
+      "trials": [
+        {"records": 10000, "acknowledgment_units": 625, "bytes_written": 5360000, "write_calls": 625, "sync_calls": 625, "append_seconds": 0.907339, "wall_seconds": 0.908456, "records_per_second": 11021.236, "ack_p50_us": 1630.375, "ack_p95_us": 3345.959, "ack_p99_us": 4458.791, "ack_max_us": 10668.875},
+        {"records": 10000, "acknowledgment_units": 625, "bytes_written": 5360000, "write_calls": 625, "sync_calls": 625, "append_seconds": 2.340154, "wall_seconds": 2.341395, "records_per_second": 4273.223, "ack_p50_us": 1772.167, "ack_p95_us": 8198.208, "ack_p99_us": 32089.417, "ack_max_us": 72721.250},
+        {"records": 10000, "acknowledgment_units": 625, "bytes_written": 5360000, "write_calls": 625, "sync_calls": 625, "append_seconds": 0.960616, "wall_seconds": 0.961750, "records_per_second": 10409.982, "ack_p50_us": 1465.666, "ack_p95_us": 2829.542, "ack_p99_us": 4169.208, "ack_max_us": 5991.417},
+        {"records": 10000, "acknowledgment_units": 625, "bytes_written": 5360000, "write_calls": 625, "sync_calls": 625, "append_seconds": 1.256404, "wall_seconds": 1.257699, "records_per_second": 7959.223, "ack_p50_us": 1555.500, "ack_p95_us": 3228.709, "ack_p99_us": 5279.792, "ack_max_us": 207867.500},
+        {"records": 10000, "acknowledgment_units": 625, "bytes_written": 5360000, "write_calls": 625, "sync_calls": 625, "append_seconds": 1.880042, "wall_seconds": 1.881220, "records_per_second": 5319.029, "ack_p50_us": 1712.375, "ack_p95_us": 7996.167, "ack_p99_us": 8076.458, "ack_max_us": 9924.791}
+      ]
+    },
+    {
+      "label": "sync_batch(64)",
+      "policy": "sync_batch",
+      "batch_size": 64,
+      "records_per_acknowledgment": 64,
+      "acknowledgment": "durable",
+      "durable_ack_latency_applicable": true,
+      "bytes_written": 5360000,
+      "peak_rss_bytes": 3219456,
+      "records_per_second": {"median": 73378.070, "min": 50678.982, "max": 78445.470},
+      "ack_latency_us": {
+        "p50": {"median": 515.291, "min": 465.000, "max": 845.166},
+        "p95": {"median": 1914.500, "min": 1775.292, "max": 2922.042},
+        "p99": {"median": 3208.334, "min": 2345.459, "max": 8168.667}
+      },
+      "trials": [
+        {"records": 10000, "acknowledgment_units": 157, "bytes_written": 5360000, "write_calls": 157, "sync_calls": 157, "append_seconds": 0.143153, "wall_seconds": 0.144221, "records_per_second": 69855.414, "ack_p50_us": 515.834, "ack_p95_us": 1847.292, "ack_p99_us": 4856.958, "ack_max_us": 7153.709},
+        {"records": 10000, "acknowledgment_units": 157, "bytes_written": 5360000, "write_calls": 157, "sync_calls": 157, "append_seconds": 0.136280, "wall_seconds": 0.137411, "records_per_second": 73378.070, "ack_p50_us": 515.291, "ack_p95_us": 1951.209, "ack_p99_us": 3040.041, "ack_max_us": 3171.458},
+        {"records": 10000, "acknowledgment_units": 157, "bytes_written": 5360000, "write_calls": 157, "sync_calls": 157, "append_seconds": 0.197320, "wall_seconds": 0.198564, "records_per_second": 50678.982, "ack_p50_us": 845.166, "ack_p95_us": 2922.042, "ack_p99_us": 8168.667, "ack_max_us": 9072.708},
+        {"records": 10000, "acknowledgment_units": 157, "bytes_written": 5360000, "write_calls": 157, "sync_calls": 157, "append_seconds": 0.135185, "wall_seconds": 0.136261, "records_per_second": 73972.793, "ack_p50_us": 477.250, "ack_p95_us": 1914.500, "ack_p99_us": 3208.334, "ack_max_us": 4063.084},
+        {"records": 10000, "acknowledgment_units": 157, "bytes_written": 5360000, "write_calls": 157, "sync_calls": 157, "append_seconds": 0.127477, "wall_seconds": 0.128528, "records_per_second": 78445.470, "ack_p50_us": 465.000, "ack_p95_us": 1775.292, "ack_p99_us": 2345.459, "ack_max_us": 2974.584}
+      ]
+    },
+    {
+      "label": "write_only",
+      "policy": "write_only",
+      "batch_size": 1,
+      "records_per_acknowledgment": 1,
+      "acknowledgment": "accepted_not_durable",
+      "durable_ack_latency_applicable": false,
+      "latency_meaning": "time to accept a record; this policy never calls the durability barrier, so durable-ack latency does not apply",
+      "bytes_written": 5360000,
+      "peak_rss_bytes": 3219456,
+      "records_per_second": {"median": 765065.049, "min": 752157.262, "max": 779803.951},
+      "ack_latency_us": {
+        "p50": {"median": 1.250, "min": 1.250, "max": 1.250},
+        "p95": {"median": 1.583, "min": 1.500, "max": 1.667},
+        "p99": {"median": 1.834, "min": 1.709, "max": 2.209}
+      },
+      "trials": [
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 0, "append_seconds": 0.013295, "wall_seconds": 0.014460, "records_per_second": 752157.262, "ack_p50_us": 1.250, "ack_p95_us": 1.667, "ack_p99_us": 2.209, "ack_max_us": 22.541},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 0, "append_seconds": 0.013071, "wall_seconds": 0.014219, "records_per_second": 765065.049, "ack_p50_us": 1.250, "ack_p95_us": 1.584, "ack_p99_us": 1.917, "ack_max_us": 12.625},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 0, "append_seconds": 0.012911, "wall_seconds": 0.014058, "records_per_second": 774554.941, "ack_p50_us": 1.250, "ack_p95_us": 1.542, "ack_p99_us": 1.834, "ack_max_us": 10.542},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 0, "append_seconds": 0.013205, "wall_seconds": 0.014351, "records_per_second": 757301.351, "ack_p50_us": 1.250, "ack_p95_us": 1.583, "ack_p99_us": 1.833, "ack_max_us": 179.458},
+        {"records": 10000, "acknowledgment_units": 10000, "bytes_written": 5360000, "write_calls": 10000, "sync_calls": 0, "append_seconds": 0.012824, "wall_seconds": 0.013987, "records_per_second": 779803.951, "ack_p50_us": 1.250, "ack_p95_us": 1.500, "ack_p99_us": 1.709, "ack_max_us": 13.500}
+      ]
+    }
+  ],
+  "comparison": {
+    "baseline": "sync_each",
+    "records_per_second_ratio_vs_baseline": {
+      "sync_each": 1.000,
+      "sync_batch(16)": 9.179,
+      "sync_batch(64)": 84.619,
+      "write_only": 882.271
+    }
+  },
+  "total_seconds": 65.296,
+  "total_bytes_written": 107200000
+}

@@ -400,7 +400,8 @@ expect_code "bench --overwrite replaces a report" 0 bench --out "$BENCH/results.
 
 ln -s "$BENCH/results.json" "$BENCH/report-link.json" 2>/dev/null
 if [ -L "$BENCH/report-link.json" ]; then
-  expect_code "bench refuses to write through a symlink" 10 bench --out "$BENCH/report-link.json" --records 4 --payload-bytes 8 --trials 1
+  # Checked before any work, so it is an argument error rather than a runtime one.
+  expect_code "bench refuses to write through a symlink" 64 bench --out "$BENCH/report-link.json" --records 4 --payload-bytes 8 --trials 1
   expect_output_contains "the symlink refusal says why" "symlink"
 fi
 
@@ -409,6 +410,50 @@ if [ -z "$(find "$BENCH" -maxdepth 1 -name 'bench-*' -print -quit)" ]; then
   ok "bench leaves no scratch fixtures behind"
 else
   bad "bench leaves no scratch fixtures behind" "$(ls -A "$BENCH")"
+fi
+
+# --- report files are guarded like any other output (CPP-AC12) ---------------
+#
+# `verify` is read-only with respect to the log, but --json writes a file, and that file
+# gets the same protection every other written path in this tool gets.
+
+REPORTS="$WORKDIR/reports"
+mkdir -p "$REPORTS"
+expect_code "verify --json writes a fresh report" 0 verify --file "$LOG" --json "$REPORTS/first.json"
+expect_code "verify --json refuses to replace a nonempty report" 64 verify --file "$LOG" --json "$REPORTS/first.json"
+expect_output_contains "the refusal names the flag" "--overwrite"
+expect_code "verify --json --overwrite replaces it" 0 verify --file "$LOG" --json "$REPORTS/first.json" --overwrite
+
+# An empty file is not content, so replacing it needs no flag.
+: > "$REPORTS/empty.json"
+expect_code "verify --json replaces an empty report" 0 verify --file "$LOG" --json "$REPORTS/empty.json"
+
+ln -s "$REPORTS/first.json" "$REPORTS/link.json" 2>/dev/null
+if [ -L "$REPORTS/link.json" ]; then
+  REPORT_HASH="$(file_hash "$REPORTS/first.json")"
+  expect_code "verify --json refuses a symlinked report path" 64 verify --file "$LOG" --json "$REPORTS/link.json"
+  if [ "$(file_hash "$REPORTS/first.json")" = "$REPORT_HASH" ]; then ok "the symlink target was untouched"
+  else bad "the symlink target was untouched" "hash changed"; fi
+fi
+
+# The report path is checked before the scan, so a refusal can never be mistaken for a
+# verdict about the log -- including when the log itself is damaged.
+expect_code "a refused report path does not mask the log's state" 64 verify --file "$CORRUPT" --json "$REPORTS/first.json"
+
+# --- a log must be a regular file (CPP-AC12) ---------------------------------
+#
+# The format is read with pread, sized with fstat and shortened with ftruncate. None of
+# those mean anything on a directory, a device or a pipe, so each is refused by name
+# rather than half-working.
+expect_code "verify refuses a directory" 10 verify --file "$WORKDIR"
+expect_output_contains "the refusal says what is wrong" "regular file"
+expect_code "append refuses a directory" 10 append --file "$WORKDIR" --records 1 --payload-bytes 8 --append-existing
+expect_code "recover refuses a directory" 10 recover --file "$WORKDIR"
+
+if mkfifo "$WORKDIR/pipe.log" 2>/dev/null; then
+  # Must refuse, and must not block waiting for a peer that will never arrive.
+  expect_code "verify refuses a named pipe" 10 verify --file "$WORKDIR/pipe.log"
+  expect_code "append refuses a named pipe" 10 append --file "$WORKDIR/pipe.log" --records 1 --payload-bytes 8 --append-existing
 fi
 
 # --- edge cases --------------------------------------------------------------

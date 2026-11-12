@@ -1,38 +1,19 @@
 #include "eventlog/reader.h"
 
-#include <unistd.h>
-
-#include <cerrno>
+#include <memory>
 #include <string>
 #include <utility>
 
 namespace eventlog {
 namespace {
 
-// Positional read: pread leaves the descriptor's own offset alone, so a reader cannot
-// perturb anything else holding the same file. Short reads happen only at end of file.
-Result<std::size_t> ReadAt(int fd, std::uint64_t offset, std::span<std::byte> out) {
-  std::size_t total = 0;
-  while (total < out.size()) {
-    const ssize_t got =
-        ::pread(fd, out.data() + total, out.size() - total, static_cast<off_t>(offset + total));
-    if (got < 0) {
-      if (errno == EINTR) continue;
-      return IoError("pread", errno, "");
-    }
-    if (got == 0) break;  // end of file
-    total += static_cast<std::size_t>(got);
-  }
-  return total;
-}
-
 // Reads and fully validates the record at `offset`.
 //
 // The payload is delivered in the caller's scratch buffer so a scan of a large log does
 // not allocate per record. Classification follows ADR-002: a short byte-prefix is a
 // recoverable incomplete tail, while a complete-but-invalid record is hard corruption.
-Result<RecordHeader> ReadRecordAt(int fd, std::uint64_t offset, std::uint64_t file_size,
-                                  std::uint64_t expected_sequence,
+Result<RecordHeader> ReadRecordAt(FileOps& ops, int fd, std::uint64_t offset,
+                                  std::uint64_t file_size, std::uint64_t expected_sequence,
                                   std::vector<std::byte>& payload) {
   const std::uint64_t remaining = file_size - offset;
 
@@ -44,7 +25,8 @@ Result<RecordHeader> ReadRecordAt(int fd, std::uint64_t offset, std::uint64_t fi
   }
 
   HeaderBytes header_bytes{};
-  Result<std::size_t> header_read = ReadAt(fd, offset, std::span<std::byte>(header_bytes));
+  Result<std::size_t> header_read =
+      ReadFullyAt(ops, fd, offset, std::span<std::byte>(header_bytes));
   if (!header_read.ok()) return header_read.error();
   if (header_read.value() < kHeaderSize) {
     return Error(ErrorKind::kIo, "file shrank while it was being read").at_offset(offset);
@@ -70,7 +52,7 @@ Result<RecordHeader> ReadRecordAt(int fd, std::uint64_t offset, std::uint64_t fi
   payload.assign(header.payload_length, std::byte{0});
   if (header.payload_length > 0) {
     Result<std::size_t> payload_read =
-        ReadAt(fd, offset + kHeaderSize, std::span<std::byte>(payload));
+        ReadFullyAt(ops, fd, offset + kHeaderSize, std::span<std::byte>(payload));
     if (!payload_read.ok()) return payload_read.error();
     if (payload_read.value() < header.payload_length) {
       return Error(ErrorKind::kIo, "file shrank while it was being read").at_offset(offset);
@@ -124,13 +106,14 @@ int LogStatusExitCode(LogStatus status) {
   return 2;
 }
 
-Result<ScanReport> ScanLog(const std::filesystem::path& path) {
+Result<ScanReport> ScanLog(const std::filesystem::path& path, std::shared_ptr<FileOps> ops_in) {
+  const std::shared_ptr<FileOps> ops = ops_in ? std::move(ops_in) : DefaultFileOps();
+
   Result<FileDescriptor> opened = OpenLogForRead(path);
   if (!opened.ok()) return opened.error();
   const FileDescriptor fd = std::move(opened).value();
 
-  PosixFileOps ops;
-  Result<std::uint64_t> size = ops.FileSize(fd.get());
+  Result<std::uint64_t> size = ops->FileSize(fd.get());
   if (!size.ok()) return size.error();
 
   ScanReport report;
@@ -142,7 +125,7 @@ Result<ScanReport> ScanLog(const std::filesystem::path& path) {
 
   while (offset < report.file_size) {
     Result<RecordHeader> header =
-        ReadRecordAt(fd.get(), offset, report.file_size, expected_sequence, payload);
+        ReadRecordAt(*ops, fd.get(), offset, report.file_size, expected_sequence, payload);
     if (!header.ok()) {
       const Error& error = header.error();
       report.problem_offset = error.offset().value_or(offset);
@@ -177,16 +160,18 @@ Result<ScanReport> ScanLog(const std::filesystem::path& path) {
   return report;
 }
 
-Result<LogReader> LogReader::Open(const std::filesystem::path& path) {
+Result<LogReader> LogReader::Open(const std::filesystem::path& path,
+                                  std::shared_ptr<FileOps> ops_in) {
+  std::shared_ptr<FileOps> ops = ops_in ? std::move(ops_in) : DefaultFileOps();
+
   Result<FileDescriptor> opened = OpenLogForRead(path);
   if (!opened.ok()) return opened.error();
   FileDescriptor fd = std::move(opened).value();
 
-  PosixFileOps ops;
-  Result<std::uint64_t> size = ops.FileSize(fd.get());
+  Result<std::uint64_t> size = ops->FileSize(fd.get());
   if (!size.ok()) return size.error();
 
-  return LogReader(std::move(fd), size.value());
+  return LogReader(std::move(fd), std::move(ops), size.value());
 }
 
 Result<std::optional<Record>> LogReader::Next() {
@@ -194,7 +179,7 @@ Result<std::optional<Record>> LogReader::Next() {
 
   std::vector<std::byte> payload;
   Result<RecordHeader> header =
-      ReadRecordAt(fd_.get(), offset_, file_size_, expected_sequence_, payload);
+      ReadRecordAt(*ops_, fd_.get(), offset_, file_size_, expected_sequence_, payload);
   if (!header.ok()) return header.error();
 
   Record record;

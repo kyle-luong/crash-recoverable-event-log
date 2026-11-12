@@ -33,12 +33,20 @@ class ScriptedFileOps final : public FileOps {
   // After this many successful syncs, fail with sync_errno. -1 disables.
   int fail_sync_after = -1;
   int sync_errno = EIO;
+  // After this many successful reads, fail with read_errno. -1 disables. A read fault
+  // must surface as an I/O error, never as a verdict about the log's contents.
+  int fail_read_after = -1;
+  int read_errno = EIO;
+  // Caps every read to this many bytes, forcing the read loop to run. 0 = no cap.
+  std::size_t max_read_bytes = 0;
 
   int write_calls = 0;
   int eintr_returned = 0;
   int successful_writes = 0;
   int sync_calls = 0;
   int successful_syncs = 0;
+  int read_calls = 0;
+  int successful_reads = 0;
 
   Result<std::size_t> Write(int fd, std::span<const std::byte> data) override {
     ++write_calls;
@@ -55,6 +63,18 @@ class ScriptedFileOps final : public FileOps {
     }
     Result<std::size_t> result = real_.Write(fd, slice);
     if (result.ok()) ++successful_writes;
+    return result;
+  }
+
+  Result<std::size_t> ReadAt(int fd, std::uint64_t offset, std::span<std::byte> out) override {
+    ++read_calls;
+    if (fail_read_after >= 0 && successful_reads >= fail_read_after) {
+      return IoError("pread", read_errno, "injected");
+    }
+    std::span<std::byte> slice = out;
+    if (max_read_bytes > 0 && slice.size() > max_read_bytes) slice = slice.first(max_read_bytes);
+    Result<std::size_t> result = real_.ReadAt(fd, offset, slice);
+    if (result.ok()) ++successful_reads;
     return result;
   }
 

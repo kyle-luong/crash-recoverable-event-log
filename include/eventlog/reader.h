@@ -3,9 +3,11 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "eventlog/error.h"
 #include "eventlog/file_ops.h"
@@ -44,13 +46,17 @@ struct ScanReport {
 
 // Read-only scan of the whole file. The file is never modified or locked. Returns an
 // Error only for I/O failures; structural damage is reported in the ScanReport, because
-// "this log is broken" is an answer, not a failure to answer.
-Result<ScanReport> ScanLog(const std::filesystem::path& path);
+// "this log is broken" is an answer, not a failure to answer. Those are different
+// verdicts and must never be swapped, which is why `ops` exists: null means
+// DefaultFileOps(), and a test substitutes a double to make a read fail.
+Result<ScanReport> ScanLog(const std::filesystem::path& path,
+                           std::shared_ptr<FileOps> ops = nullptr);
 
 // Sequential record reader, for reading payloads back out of a log.
 class LogReader {
  public:
-  static Result<LogReader> Open(const std::filesystem::path& path);
+  static Result<LogReader> Open(const std::filesystem::path& path,
+                                std::shared_ptr<FileOps> ops = nullptr);
 
   LogReader(LogReader&&) noexcept = default;
   LogReader& operator=(LogReader&&) noexcept = default;
@@ -64,10 +70,11 @@ class LogReader {
   std::uint64_t offset() const { return offset_; }
 
  private:
-  explicit LogReader(FileDescriptor fd, std::uint64_t file_size)
-      : fd_(std::move(fd)), file_size_(file_size) {}
+  LogReader(FileDescriptor fd, std::shared_ptr<FileOps> ops, std::uint64_t file_size)
+      : fd_(std::move(fd)), ops_(std::move(ops)), file_size_(file_size) {}
 
   FileDescriptor fd_;
+  std::shared_ptr<FileOps> ops_;
   std::uint64_t file_size_ = 0;
   std::uint64_t offset_ = 0;
   std::uint64_t records_read_ = 0;

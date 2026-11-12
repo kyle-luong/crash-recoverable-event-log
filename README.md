@@ -38,13 +38,17 @@ The binary lands at `build/debug-asan/eventlog` (or `build/release/eventlog`).
 
 ## Use
 
-Real output from a Release build on Linux (Debian 12, aarch64, ext4), captured by
-`scripts/verify-linux.sh`'s toolchain. File sizes are deterministic, so yours will match.
+Every block below is **real output**, re-captured from a Release build on Linux (Debian 12,
+aarch64, ext4) using `scripts/verify-linux.sh`'s toolchain, and checked line by line against this
+file. Nothing here is illustrative. File sizes and offsets are deterministic, so yours will match
+exactly; throughput figures are the one thing that will not, which is why they live in
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md) with the machine that produced them.
 
 ```console
 $ eventlog append --file demo/events.log --records 1000 --payload-bytes 128
 Records appended: 1000  Durable acknowledged: 1000
 Policy: sync_each  Durability barrier: fdatasync  File size: 152000 bytes
+Acknowledgments: 1000  Barrier calls: 1000  Write calls: 1000
 
 $ eventlog verify --file demo/events.log
 Valid records: 1000   Last sequence: 1000   Status: clean
@@ -270,9 +274,14 @@ bytes for any record.
 ## Layout
 
 ```
-include/eventlog/   public headers (error, record, crc32c, file_ops, writer, reader, recover)
-src/                implementation; file_ops.cpp is the only POSIX boundary
+include/eventlog/   public headers: the format (record, crc32c, endian), the log
+                    (writer, reader, recover, payload), the POSIX boundary
+                    (file_ops, scratch_dir), the tools (crash_test, benchmark, cli)
+src/                implementation. All of the log's own I/O goes through
+                    file_ops.cpp; the crash harness also uses fork/exec/kill and the
+                    benchmark reads the environment, neither of which touch a log
 tests/              9 C++ suites plus a CLI integration suite
+benchmarks/         the method, and the measured results it governs
 docs/PRD.md         the product contract
 docs/PLAN.md        milestones, with the verification command for each
 docs/STATUS.md      current state and next action
@@ -280,8 +289,11 @@ docs/decisions/     ADRs for the decisions that fix a guarantee or the workflow
 ```
 
 `FileOps` is the one extracted interface, and it exists because the fault tests have to produce
-short writes, `EINTR`, `EIO`, and a failed sync without depending on OS timing. Normal runtime uses
-`PosixFileOps`, which does nothing but call the syscalls.
+short writes, `EINTR`, `EIO`, a failed sync and a failed read without depending on OS timing. Normal
+runtime uses `PosixFileOps`, which does nothing but call the syscalls. Everything that writes or
+reads a log goes through it, including the scanner — so "the disk failed" and "the data is corrupt"
+are different verdicts with a test each, rather than two names for whichever one the code reached
+first.
 
 ## Testing
 
@@ -289,9 +301,11 @@ short writes, `EINTR`, `EIO`, and a failed sync without depending on OS timing. 
 test_scaffold  error/result types, syscall context in messages, scratch-dir discipline
 test_crc32c    published CRC-32C vectors, chaining, all 2048 single-bit flips of a 256-byte block
 test_codec     golden byte vectors, round-trips at 0/1/128/1 MiB, every rejection path
-test_writer    short writes, EINTR retry, EIO, failed sync, lock contention, policy guards
+test_writer    short writes, EINTR retry, EIO, failed sync, lock contention, policy
+               guards, and write_only's accepted-never-durable contract
 test_batch     whole-batch acknowledgment, failed batch write and sync, syscall counts
-test_reader    1000-record round-trip byte-for-byte, scan report accuracy
+test_reader    1000-record round-trip byte-for-byte, scan report accuracy, injected
+               read faults, and the refusal of anything that is not a regular file
 test_recovery  every byte offset of a trailing record, mid-log corruption, sequence violations
 test_crash     the acknowledged-prefix oracle, against logs damaged on purpose
 test_bench     percentiles and spread, per-policy barrier counts, equal workloads,

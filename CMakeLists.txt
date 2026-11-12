@@ -29,6 +29,10 @@ if(EVENTLOG_SANITIZERS)
   target_link_options(eventlog_flags INTERFACE -fsanitize=address,undefined)
   # `bench` reports this, so a sanitizer build can never be mistaken for a measurement.
   target_compile_definitions(eventlog_flags INTERFACE EVENTLOG_SANITIZERS_ON=1)
+  # Bounds-checked standard containers in the instrumented build. ASan catches a read
+  # past the end of a heap block; this also catches an out-of-range operator[] that
+  # happens to land inside one. libc++ ignores the macro, so it is safe to set anywhere.
+  target_compile_definitions(eventlog_flags INTERFACE _GLIBCXX_ASSERTIONS=1)
 endif()
 
 # Also reported with every benchmark result (CPP-T17).

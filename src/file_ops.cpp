@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <limits>
 #include <string>
+#include <utility>
 
 namespace eventlog {
 namespace {
@@ -50,6 +51,16 @@ Result<std::size_t> PosixFileOps::Write(int fd, std::span<const std::byte> data)
   const ssize_t written = ::write(fd, data.data(), data.size());
   if (written < 0) return IoError("write", errno, "");
   return static_cast<std::size_t>(written);
+}
+
+Result<std::size_t> PosixFileOps::ReadAt(int fd, std::uint64_t offset, std::span<std::byte> out) {
+  if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+    return Error(ErrorKind::kInvalidArgument,
+                 "read offset " + std::to_string(offset) + " exceeds off_t range");
+  }
+  const ssize_t got = ::pread(fd, out.data(), out.size(), static_cast<off_t>(offset));
+  if (got < 0) return IoError("pread", errno, "");
+  return static_cast<std::size_t>(got);
 }
 
 Status PosixFileOps::SyncData(int fd) {
@@ -149,30 +160,80 @@ Status WriteFully(FileOps& ops, int fd, std::span<const std::byte> data,
   return Status::Ok();
 }
 
+Result<std::size_t> ReadFullyAt(FileOps& ops, int fd, std::uint64_t offset,
+                                std::span<std::byte> out) {
+  std::size_t total = 0;
+  while (total < out.size()) {
+    Result<std::size_t> got = ops.ReadAt(fd, offset + total, out.subspan(total));
+    if (!got.ok()) {
+      // EINTR is the only retryable condition. Every other error is surfaced as an I/O
+      // error, which is a different verdict from corruption and must stay one.
+      if (got.error().kind() == ErrorKind::kIo && got.error().errno_value() == EINTR) continue;
+      Error error = got.error();
+      return error.at_offset(offset + total);
+    }
+    if (got.value() == 0) break;  // end of file
+    total += got.value();
+  }
+  return total;
+}
+
+namespace {
+
+// A log must be a regular file; see the note in file_ops.h. Checked on the descriptor.
+//
+// O_NONBLOCK on every open above is what makes this reachable for a named pipe: opening
+// one for writing would otherwise block until a reader appeared, so the tool would hang
+// on a path it should refuse. The flag has no effect on a regular file, which is the only
+// thing that gets past here.
+Status RequireRegularFile(int fd, const std::filesystem::path& path) {
+  using StatBuf = struct ::stat;
+  StatBuf info{};
+  if (::fstat(fd, &info) != 0) return IoError("fstat", errno, path.string());
+  if (!S_ISREG(info.st_mode)) {
+    return Error(ErrorKind::kInvalidArgument,
+                 path.string() + " is not a regular file; an event log must be one");
+  }
+  return Status::Ok();
+}
+
+}  // namespace
+
 Result<OpenedFile> OpenLogForAppend(const std::filesystem::path& path) {
   // O_EXCL first, so "did this call create the file?" is answered by the kernel instead
   // of by a separate stat that could race. The answer decides whether the directory
   // entry still needs an fsync before anything can be acknowledged.
-  int raw = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC, kLogFileMode);
+  int raw = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_CLOEXEC | O_NONBLOCK,
+                   kLogFileMode);
   if (raw >= 0) return OpenedFile{FileDescriptor(raw), true};
   if (errno != EEXIST) return IoError("open", errno, path.string());
 
-  raw = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+  raw = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC | O_NONBLOCK);
   if (raw < 0) return IoError("open", errno, path.string());
-  return OpenedFile{FileDescriptor(raw), false};
+  FileDescriptor fd(raw);
+  Status regular = RequireRegularFile(fd.get(), path);
+  if (!regular.ok()) return regular.error();
+  return OpenedFile{std::move(fd), false};
 }
 
 Result<FileDescriptor> OpenLogForRead(const std::filesystem::path& path) {
-  const int raw = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  const int raw = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
   if (raw < 0) return IoError("open", errno, path.string());
-  return FileDescriptor(raw);
+  FileDescriptor fd(raw);
+  Status regular = RequireRegularFile(fd.get(), path);
+  if (!regular.ok()) return regular.error();
+  return fd;
 }
 
 Result<FileDescriptor> OpenLogForUpdate(const std::filesystem::path& path) {
   // O_NOFOLLOW: a destructive operation must never be redirected through a symlink.
-  const int raw = ::open(path.c_str(), O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+  const int raw = ::open(path.c_str(), O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
   if (raw < 0) return IoError("open", errno, path.string());
-  return FileDescriptor(raw);
+  FileDescriptor fd(raw);
+  // Truncating a device or a pipe is not a recovery, whatever it is.
+  Status regular = RequireRegularFile(fd.get(), path);
+  if (!regular.ok()) return regular.error();
+  return fd;
 }
 
 Status AcquireExclusiveLock(int fd, const std::filesystem::path& path) {

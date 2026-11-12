@@ -119,6 +119,9 @@ class CheckpointFileOps final : public FileOps {
     return Status::Ok();
   }
 
+  Result<std::size_t> ReadAt(int fd, std::uint64_t offset, std::span<std::byte> out) override {
+    return real_.ReadAt(fd, offset, out);
+  }
   Status SyncDirectory(const std::filesystem::path& directory) override {
     return real_.SyncDirectory(directory);
   }
@@ -243,6 +246,13 @@ Result<RunOutcome> RunOneScenario(const CrashScenario& scenario, const std::file
   if (pid == 0) {
     // Child. The frame channel becomes stdout; stderr stays inherited so a crash report
     // from the child is visible in test output.
+    //
+    // The only raw close() calls in this project, and deliberately so: between fork and
+    // exec nothing may allocate or take a lock, and every path out of here is _exit or
+    // execv, neither of which runs a destructor. Routing these through the FileDescriptor
+    // objects above would therefore close nothing and add a destructor that can never
+    // run. Both descriptors must go explicitly, or the child keeps the read end open and
+    // the supervisor's read() never sees end of file.
     if (::dup2(fds[1], STDOUT_FILENO) < 0) ::_exit(kChildHarnessFailure);
     if (fds[0] != STDOUT_FILENO) ::close(fds[0]);
     if (fds[1] != STDOUT_FILENO) ::close(fds[1]);

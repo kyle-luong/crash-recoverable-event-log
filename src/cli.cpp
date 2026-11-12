@@ -37,7 +37,7 @@ Usage:
   eventlog append  --file PATH --records N --payload-bytes B
                    [--policy sync_each|sync_batch|write_only] [--batch-size N]
                    [--append-existing | --overwrite]
-  eventlog verify  --file PATH [--json PATH]
+  eventlog verify  --file PATH [--json PATH] [--overwrite]
   eventlog recover --file PATH [--truncate-tail]
   eventlog crash-test --workdir DIR [--runs N] [--seed N] [--scenario NAME]
                       [--child-program PATH]
@@ -55,8 +55,10 @@ Commands:
             write_only never calls the barrier at all: its records are
             ACCEPTED and never durable. It exists to measure what durability
             costs, and must not be used to store anything.
-  verify    Read-only. Validates framing, CRC32C, and the sequence chain.
-            Exit 0 clean, 1 incomplete trailing record, 2 hard corruption.
+  verify    Read-only with respect to the log. Validates framing, CRC32C, and
+            the sequence chain. Exit 0 clean, 1 incomplete trailing record,
+            2 hard corruption. --json writes a report, which needs
+            --overwrite to replace a file that already has content.
   recover   Reports a structurally incomplete trailing record. Truncates it only
             when --truncate-tail is given, and never touches hard corruption.
   crash-test
@@ -162,6 +164,32 @@ class Arguments {
   std::map<std::string, std::string> values_;
   std::set<std::string> flags_;
 };
+
+// Writing a report is destructive to that path, so every command that does it follows
+// the same two rules: never through a symlink, and never over existing content without
+// being told to (CLAUDE.md safety rules, docs/PRD.md section 3). Checked before the
+// command does any work, so a refusal cannot be mistaken for a verdict about the log.
+Result<std::filesystem::path> CheckReportPath(const std::string& raw, bool overwrite) {
+  const std::filesystem::path out(raw);
+  if (out.empty()) {
+    return Error(ErrorKind::kInvalidArgument, "the report path is empty");
+  }
+  std::error_code ec;
+  if (std::filesystem::is_symlink(out, ec)) {
+    return Error(ErrorKind::kInvalidArgument,
+                 out.string() + " is a symlink; refusing to write a report through it");
+  }
+  if (std::filesystem::exists(out, ec)) {
+    // An unreadable size is treated as nonempty: refusing is the safe direction.
+    const std::uintmax_t size = std::filesystem::file_size(out, ec);
+    if ((ec || size > 0) && !overwrite) {
+      return Error(
+          ErrorKind::kInvalidArgument,
+          out.string() + " already exists and is not empty; pass --overwrite to replace it");
+    }
+  }
+  return out;
+}
 
 int Fail(const Error& error, int code) {
   std::cerr << "error: " << error.message() << "\n";
@@ -339,11 +367,21 @@ Status WriteVerifyJson(const std::filesystem::path& path, const std::filesystem:
 
 int CommandVerify(int argc, char** argv) {
   Arguments args;
-  Status parsed = args.Parse(argc, argv, 2, {"file", "json"}, {});
+  Status parsed = args.Parse(argc, argv, 2, {"file", "json"}, {"overwrite"});
   if (!parsed.ok()) return FailUsage(parsed.error());
 
   Result<std::filesystem::path> file = args.required_file();
   if (!file.ok()) return FailUsage(file.error());
+
+  // Checked before the scan, so the exit code always describes the log rather than the
+  // report path.
+  std::filesystem::path json_path;
+  if (args.has_value("json")) {
+    Result<std::filesystem::path> checked =
+        CheckReportPath(args.value("json"), args.has_flag("overwrite"));
+    if (!checked.ok()) return FailUsage(checked.error());
+    json_path = std::move(checked).value();
+  }
 
   // Strictly read-only: the log is never opened for writing and never locked.
   Result<ScanReport> scanned = ScanLog(file.value());
@@ -373,8 +411,8 @@ int CommandVerify(int argc, char** argv) {
     }
   }
 
-  if (args.has_value("json")) {
-    Status written = WriteVerifyJson(args.value("json"), file.value(), report);
+  if (!json_path.empty()) {
+    Status written = WriteVerifyJson(json_path, file.value(), report);
     if (!written.ok()) return Fail(written.error(), kExitRuntimeError);
   }
 
@@ -537,7 +575,10 @@ int CommandBench(int argc, char** argv) {
     return FailUsage(Error(ErrorKind::kInvalidArgument,
                            "--out is required: a benchmark that is not recorded is not a result"));
   }
-  const std::filesystem::path out(args.value("out"));
+  Result<std::filesystem::path> checked_out =
+      CheckReportPath(args.value("out"), args.has_flag("overwrite"));
+  if (!checked_out.ok()) return FailUsage(checked_out.error());
+  const std::filesystem::path out = std::move(checked_out).value();
 
   BenchmarkOptions options;
   if (args.has_value("records")) {
@@ -562,19 +603,7 @@ int CommandBench(int argc, char** argv) {
                                                      ? out.parent_path()
                                                      : std::filesystem::path("."));
 
-  // Writing the report is destructive if something is already there.
   std::error_code ec;
-  if (std::filesystem::is_symlink(out, ec)) {
-    return Fail(Error(ErrorKind::kInvalidArgument,
-                      out.string() + " is a symlink; refusing to write a report through it"),
-                kExitRuntimeError);
-  }
-  const bool exists = std::filesystem::exists(out, ec);
-  if (exists && std::filesystem::file_size(out, ec) > 0 && !args.has_flag("overwrite")) {
-    return FailUsage(Error(ErrorKind::kInvalidArgument,
-                           out.string() + " already exists and is not empty; pass --overwrite to "
-                                          "replace it"));
-  }
   std::filesystem::create_directories(options.workdir, ec);
   if (ec) {
     return Fail(Error(ErrorKind::kIo, "could not create " + options.workdir.string(), ec.value()),

@@ -61,6 +61,15 @@ class FileOps {
   // WriteFully rather than assuming completion.
   virtual Result<std::size_t> Write(int fd, std::span<const std::byte> data) = 0;
 
+  // Positional read of up to out.size() bytes, returning how many were transferred --
+  // short only at end of file. Positional so a reader cannot disturb the offset of
+  // anything else holding the same file.
+  //
+  // On this boundary so a read fault can be injected as well as a write one. An I/O
+  // error while reading must be reported as an I/O error and never as corruption, and
+  // that distinction is only worth having if a test can produce the error.
+  virtual Result<std::size_t> ReadAt(int fd, std::uint64_t offset, std::span<std::byte> out) = 0;
+
   // The durability barrier (ADR-001): fdatasync on Linux, fcntl(F_FULLFSYNC) on macOS.
   // Nothing may be reported durable until this returns success.
   virtual Status SyncData(int fd) = 0;
@@ -75,6 +84,7 @@ class FileOps {
 class PosixFileOps final : public FileOps {
  public:
   Result<std::size_t> Write(int fd, std::span<const std::byte> data) override;
+  Result<std::size_t> ReadAt(int fd, std::uint64_t offset, std::span<std::byte> out) override;
   Status SyncData(int fd) override;
   Status SyncDirectory(const std::filesystem::path& directory) override;
   Status Truncate(int fd, std::uint64_t length) override;
@@ -86,6 +96,11 @@ std::shared_ptr<FileOps> DefaultFileOps();
 // Which primitive SyncData actually calls on this build, for honest result reporting.
 std::string_view SyncPrimitiveName();
 
+// Reads every byte of `out` unless end of file comes first, returning how many bytes
+// were transferred. Retries only EINTR.
+Result<std::size_t> ReadFullyAt(FileOps& ops, int fd, std::uint64_t offset,
+                                std::span<std::byte> out);
+
 // Writes every byte of `data`, looping over short writes and retrying only EINTR.
 // `file_offset` is the file position `data` starts at, used for error context only.
 Status WriteFully(FileOps& ops, int fd, std::span<const std::byte> data, std::uint64_t file_offset);
@@ -95,6 +110,12 @@ struct OpenedFile {
   bool created = false;
 };
 
+// Every open below requires the path to resolve to a regular file. The format is read
+// with pread(2), sized with fstat(2) and shortened with ftruncate(2), none of which mean
+// anything on a pipe, socket, or device, so this is a correctness requirement rather than
+// a policy choice. It is checked on the descriptor, never on the path, so nothing can be
+// swapped in between the check and the open.
+//
 // O_WRONLY|O_APPEND|O_CREAT, mode 0644. O_APPEND means a buggy offset can never
 // overwrite committed data in an append-only log.
 Result<OpenedFile> OpenLogForAppend(const std::filesystem::path& path);

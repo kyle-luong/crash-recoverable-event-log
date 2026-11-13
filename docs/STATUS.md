@@ -1,10 +1,14 @@
 # Current state
 
-Milestone: **M5 complete — every PRD milestone is done** | Active task: none
+Milestone: **complete — every PRD milestone is done and the definition of done is met** | Active
+task: none
 Branch: `main` (main-first, ADR-005)
-Last known good commit: `fa7fa70` (M5), verified by `./scripts/verify-linux.sh`
-Status: M1 through M5 verified on Linux and pushed to `origin`. All 16 acceptance criteria in
-`docs/PLAN.md` have named evidence; none is listed as uncovered.
+Last known good commit: `8491ead` (audit remediation), verified by `./scripts/verify-linux.sh`
+Status: M1 through M5 verified on Linux and pushed to `origin`, then the independent review that
+item 8 of the definition of done required was carried out, its three confirmed defects remediated,
+and the suite re-verified. All 16 acceptance criteria in `docs/PLAN.md` have named evidence; none is
+listed as uncovered. **This project is finished.** Nothing in `docs/PLAN.md` or PRD §7 is
+outstanding, and PRD §8 is explicitly out of MVP scope — do not start it from this file.
 
 ## Done
 
@@ -13,7 +17,7 @@ implementation. Explicit little-endian serialization; nothing in the format path
 endianness or struct layout.
 
 `sync_each` writer: RAII descriptor, short-write loop retrying only `EINTR`, advisory `flock` for
-cooperating writers, directory fsync on file creation, and a terminal failure state after any failed
+cooperating writers, directory fsync for any log that holds no records yet, and a terminal failure state after any failed
 write or sync (ADR-003). `durable_through_sequence` advances only after the durability barrier
 returns success; `accepted_through_sequence` is tracked separately and never conflated with it.
 Resuming an existing log syncs its prefix once at `Open` rather than inferring durability from the
@@ -87,17 +91,17 @@ three phases:
 
 | Phase | Build | Total | Slowest two |
 |---|---|---:|---|
-| 1 fast | Debug, ASan+UBSan | 57.9 s | `cli_tests` 57.9 s, `test_reader` 3.6 s |
-| 2 exhaustive (`EVENTLOG_SLOW_TESTS=ON`) | Debug, ASan+UBSan | 99.2 s | `cli_tests` 85.6 s, `test_recovery` 7.6 s |
-| 3 Release | Release, no sanitizers | 6.3 s | `test_recovery` 3.7 s, `cli_tests` 1.5 s |
+| 1 fast | Debug, ASan+UBSan | 59.6 s | `cli_tests` 59.5 s, `test_reader` 2.0 s |
+| 2 exhaustive (`EVENTLOG_SLOW_TESTS=ON`) | Debug, ASan+UBSan | 124.0 s | `cli_tests` 110.6 s, `test_recovery` 8.0 s |
+| 3 Release | Release, no sanitizers | 16.3 s | `test_recovery` 10.2 s, `cli_tests` 4.2 s |
 
 `cli_tests` dominates the first two phases and is almost entirely the 300-scenario crash gate; its
 cost there is ASan's startup in each of the 300 forked children, which is why the same gate takes
-1.5 s in Release. The gate does run in all three phases — `ctest` sets `EVENTLOG_SLOW_TESTS=1` for
+4.2 s in Release. The gate does run in all three phases — `ctest` sets `EVENTLOG_SLOW_TESTS=1` for
 `cli_tests` whenever the CMake option is on, and the case count confirms it (163 with the gate, 160
 without).
 
-**GitHub Actions: success** for the same commit (run 43332148586, 1 m 48 s). It runs the identical
+**GitHub Actions: success** for the same commit `8491ead` (run 43339561632, 1 m 26 s). It runs the identical
 `verify-full.sh` on `ubuntu-latest` x86_64, so every phase above is confirmed on a second
 architecture in a clean checkout. The container gate is the pinned, authoritative one
 (`debian:bookworm-20250929-slim`); CI is deliberately left on the moving `ubuntu-latest` toolchain,
@@ -113,14 +117,14 @@ convenience check, not evidence (ADR-004).
 | `test_scaffold` | 8 |
 | `test_crc32c` | 6 |
 | `test_codec` | 18 |
-| `test_writer` | 21 |
+| `test_writer` | 23 |
 | `test_batch` | 12 |
 | `test_reader` | 15 |
-| `test_recovery` | 17 |
+| `test_recovery` | 18 |
 | `test_crash` | 15 |
 | `test_bench` | 15 |
 | `cli_tests` | 163 |
-| **total** | **290** |
+| **total** | **293** |
 
 The M3 acceptance gate from `docs/PLAN.md` runs inside `cli_tests` under `EVENTLOG_SLOW_TESTS`:
 `eventlog crash-test --runs 300 --seed 42 --workdir <scratch>` exits 0 with 300 scenarios, 0
@@ -142,6 +146,9 @@ All on `main`. M1 and M2 were pushed to `origin` on 2026-11-10; M3, M4 and M5 on
 
 | Commit | Date | Subject |
 |---|---|---|
+| `8491ead` | 2026-11-12 | Remediate the audit's confirmed defects and simplify |
+| `50b2c0f` | 2026-11-12 | Record the final verified state and definition of done |
+| `ab4dad4` | 2026-11-12 | Record milestone five results and the final verified state |
 | `fa7fa70` | 2026-11-12 | Harden the read path and guard every report file |
 | `5c226a5` | 2026-11-12 | Record milestone four results and measured benchmarks |
 | `e8437ae` | 2026-11-12 | Add the release benchmark and the write_only baseline |
@@ -195,7 +202,8 @@ never that any of them reached the durability barrier. A writer killed between `
 sync leaves a log that scans identically to a fully synced one, and `write_only` produces that
 state by design. `Open` now issues one `SyncData` before reporting the resumed prefix as
 durable, and fails with `kUnknownDurability` if that call fails. Three tests pin it:
-`ResumeSyncsTheExistingPrefix`, `ResumeFailsOpenWhenTheSyncFails`, `FreshLogDoesNotSyncDataAtOpen`.
+`ResumeSyncsTheExistingPrefix`, `ResumeFailsOpenWhenTheSyncFails`,
+`FreshLogSyncsItsDirectoryEntryAndNoDataAtOpen`.
 
 Checked and found correct, recorded so the reasoning is not re-derived:
 
@@ -248,26 +256,37 @@ use case.
 
 ### The one correctness caveat left, with its severity
 
-`ApplyRecovery`'s stale-plan guard compares the file's **size** against the preflight, not its
-contents. The window is real: `PlanRecovery` scans without a lock, and `ApplyRecovery` takes the
-writer lock afterwards. An in-place modification of the same length inside that window would not be
-detected, and the truncation would run against a plan that no longer describes the file.
+**Narrowed on 2026-11-12.** A previous version of this section argued that a stale plan could not
+discard a valid record, because `truncate_to` ends a prefix that was valid when the plan was made
+and "a same-length edit cannot make that prefix longer". That reasoning holds for an edit **in
+place**. It did not hold for a *different file* of the same length appearing at the path, which can
+have a longer valid prefix — so applying the stale target to it would have discarded a complete
+record, the one thing ADR-002 forbids outright. The independent audit found that hole.
 
-Why it is a caveat and not a defect to fix in a hurry:
+`ApplyRecovery` now compares the file's **identity** (device and inode, read from the descriptor it
+holds under the lock) as well as its length, against the identity `PlanRecovery` captured *before*
+it scanned. A replaced, renamed or recreated file is refused with "is no longer the file the
+preflight examined". `PlanIsRejectedWhenTheFileWasReplacedAtTheSameSize` pins it with a real
+replacement at a byte-identical length, so the length check cannot be what rejects it.
+
+What remains is narrower: an **in-place** modification of the same file, at the same length, inside
+the window between the preflight and the lock. Same inode, same size, so neither check sees it.
+
+Why that remainder is a caveat and not a defect to fix in a hurry:
 
 - It needs a **non-cooperating** writer. A cooperating one cannot do it — appending changes the
   size, and it cannot hold the lock. PRD §3 says explicitly not to claim a guarantee against
   processes that ignore `flock`, so this is outside the stated contract.
-- The failure mode is not data loss. Truncating to a stale `truncate_to` can only leave a damaged
-  record in place, reported with counts from the stale plan; the next `verify` catches it. It cannot
-  discard an acknowledged record, because `truncate_to` is the end of a prefix that was valid when
-  the plan was made and a same-length edit cannot make that prefix longer.
-- The fix is small and known: re-scan under the lock and compare the plan before truncating, now
-  that `ScanLog` accepts an injected `FileOps`. Roughly a dozen lines plus a test.
+- The failure mode is not data loss, and here the original reasoning does apply: an in-place edit
+  cannot lengthen the valid prefix, so truncating to the stale `truncate_to` can only leave a
+  damaged record in place, reported with counts from the stale plan, and the next `verify` catches
+  it. It cannot discard an acknowledged record.
+- Closing it needs the scan and the truncation to share one descriptor, which means `ScanLog`
+  taking an `fd` rather than a path. That is a signature change across the read path for a trigger
+  that is out of scope.
 
-It is recorded rather than done because no acceptance criterion asks for it and the trigger is out
-of scope. It is the first thing to pick up if this project is ever extended to tolerate writers that
-do not cooperate.
+None of this makes concurrent modification safe, and nothing here claims it does: the identity check
+rejects a stale plan, and this project still supports one writer at a time (PRD §2).
 
 ## Crash harness notes (2026-11-12)
 
@@ -404,6 +423,83 @@ POSIX boundary" had stopped being true once the crash harness started calling `f
 and the benchmark started reading the environment. That sentence is now specific about what goes
 through `FileOps` and what does not.
 
+## Independent audit remediation (2026-11-12)
+
+No ADR: nothing here decided anything the PRD had left open. Two items corrected code that was
+narrower than its own documentation, one corrected an exit code, one closed a hole in a guard, and
+the rest removed code. The audit that found them is the review item 8 of the definition of done had
+been waiting for; it re-ran `verify-linux.sh` and the 300-scenario gate itself rather than taking
+the previous evidence on trust, and it confirmed the acknowledgment boundary, the recovery
+classifications and the supervisor's oracle as correct.
+
+**Fixed — the directory entry was never synced for a log this tool did not create.** `Open` synced
+the containing directory only when its own `open(O_EXCL)` had created the file. A file that already
+existed but was empty passed both guards: `file.created` was false and `size > 0` was false, so no
+directory sync ever happened for that log, by anyone. `touch events.log && eventlog append` is
+ordinary use and needs no flag, and it acknowledged records whose file name had never been flushed.
+ADR-001 and `docs/SPEC_VALIDATION.md` R4 both state the wider rule, so the code was narrower than
+the documents rather than the documents being wrong. The guard is now `file.created || size == 0`.
+Only power loss could ever have exposed it — under a process crash the directory entry is in the
+page cache — so no claim this project makes was false. Both documents now state the implemented
+trigger, and ADR-001 records the amendment.
+
+**Fixed — that directory sync had no test at all.** It was the one durability step in the project
+with nothing that could fail if it broke: `ScriptedFileOps` had counters and failure injection for
+writes, syncs and reads, and nothing for `SyncDirectory`. The test whose comment claimed to cover it
+asserted only that no *data* sync happened. Deleting the call outright would have kept the suite
+green, which is why the defect above survived five milestones. `ScriptedFileOps` now counts
+directory syncs and can fail them, and three cases pin the behaviour:
+`FreshLogSyncsItsDirectoryEntryAndNoDataAtOpen`, `ExistingEmptyLogStillSyncsItsDirectoryEntry` and
+`OpenFailsWhenTheDirectorySyncFails`. Each new case was checked against a build with the fix removed
+and fails there, so none of them is vacuous.
+
+**Fixed — an out-of-range `--batch-size` reported the wrong exit code.** `--records` and
+`--payload-bytes` are parsed with their real bounds and exit `64`, and so does the batch *buffer*
+bound on the adjacent line of `cli_tests.sh`; `--batch-size` alone was parsed with a ceiling of
+`1 << 20`, passed parsing, and failed later inside `Open` as a runtime error (`10`). It is now
+parsed with `kMaxBatchRecords`. PRD §3's table says only "nonzero on I/O/contract error" for
+`append`, so both codes satisfied the PRD; what the old behaviour contradicted was the README's own
+exit-code table, which assigns `64` to "invalid arguments" and `10` to an "I/O or contract error".
+An out-of-range bound is an invalid argument, so `64` is the documented code. One existing `cli_tests.sh` assertion encoded the old
+code and was updated to `64`; it still asserts a refusal with its message, so nothing was weakened.
+`sync_batch --batch-size 1` keeps exit `10`: that is a policy-coherence error caught in `Open`, not
+an out-of-range number.
+
+**Closed — the stale-plan guard could be satisfied by a different file.** Evaluated first, as asked:
+a same-length *replacement* is not realistically reachable inside the supported model, which is one
+cooperating writer and no concurrent modification (PRD §2). It needs a second process to delete and
+recreate the log at the same byte length inside the window between `PlanRecovery` and
+`ApplyRecovery`'s lock. It was fixed anyway because the guard is cheap and the outcome it prevents —
+silently discarding a complete valid record — is the single thing ADR-002 forbids without
+qualification. `IdentifyFile(fd)` returns device and inode; `PlanRecovery` captures it *before* the
+scan, so the recorded identity is never newer than the scan it belongs to; `ApplyRecovery` compares
+it on the descriptor it holds under the lock. See *The one correctness caveat left* for what this
+does and does not cover. It rejects a stale plan. It does not make concurrent modification safe.
+
+**Simplified.** `FileDescriptor::release()` deleted — unused everywhere, and it handed out a raw
+descriptor, which is the one escape hatch the project's "no bare `close()` in logic code" rule
+exists to prevent. `kMaxRecordSize` deleted — unused. `EncodeHeader` moved out of `record.h` into
+the anonymous namespace of `record.cpp`, its only caller. The per-record header is now laid down
+once instead of twice: `EncodeHeader` used to fill the 24-byte prefix and then call
+`ComputeRecordCrc`, which filled its own second copy of the same bytes purely to checksum them; it
+now checksums the bytes it just wrote. `ComputeRecordCrc` stays public because the read path and
+`test_codec` both need it from header fields alone. Output is byte-identical, which the golden
+vectors and `sync_batch`/`sync_each` file comparison both confirm. The `eintr_rounds` comment in
+`ScriptedFileOps` was corrected: the counter is a lifetime total, not per write, and a future test
+written from the old comment would have passed for the wrong reason.
+
+**Left open, deliberately, with the benefit judged too small.** Both were offered by the audit and
+declined rather than missed:
+
+- `verify --json` writes no report when the log's format version is unsupported. The exit code is
+  correct (`2`), the message is on stderr, the bytes are preserved, and the README never promises a
+  report for every verdict. A `ScanReport` cannot carry the verdict either, because PRD §4's result
+  classes do not include one — so the honest fix is documentation, which this entry is.
+- `WriteFully` and `ReadFullyAt` retry `EINTR` without a bound. `write(2)` on a regular file does
+  not return `EINTR` repeatedly, so this is unreachable in production; a `FileOps` double that
+  always returned it would hang until the 300-second `ctest` timeout. The 3-attempt no-progress
+  guard already covers the reachable case.
+
 ## Next action
 
 None. Every milestone in `docs/PLAN.md` is `done` and all 16 acceptance criteria have named
@@ -428,18 +524,25 @@ Checked against `docs/PRD.md` §7, with the evidence rather than the traceabilit
 | 5 | CI and sanitizer tests pass; no race-prone concurrency added for its own sake | met | three-phase Linux run above, plus GitHub Actions on a clean x86_64 runner; `grep` for `std::thread`, `std::mutex`, `std::atomic`, `pthread_`, `condition_variable` across `src/` and `include/` returns nothing — the project is single-threaded by construction |
 | 6 | Release benchmark compares policies with recorded environment, raw metrics, honest interpretation | met | `benchmarks/RESULTS.md` and three committed `results-*.json`, each carrying its own environment block and `publishable` flag; the interpretation leads with a 4.3× trial spread and refuses to pin a multiplier |
 | 7 | README has concrete commands, limitations, and real sample output clearly labelled | met | every documented command re-run on Linux Release and diffed against the file; one defect found and fixed (a dropped output line) |
-| 8 | Independent review of format/acknowledgment correctness, integer and bounds handling, and crash-harness assumptions; human merges | **not met** | see below |
+| 8 | Independent review of format/acknowledgment correctness, integer and bounds handling, and crash-harness assumptions; human merges | met | fresh-context audit on 2026-11-12 covering exactly the three targets named below, owner-approved, three confirmed defects remediated — see *Independent audit remediation* |
 
-**Item 8 is the one gap, and more work by me cannot close it.** Every review in this repository has
-been mine, including the final one. Self-review has found real defects — an overstated latency ratio,
-a sub-microsecond figure rounding to `0 µs`, a test that asserted its own build type, a 39×
-sanitizer regression — so it is not worthless. But it cannot find the class of error where a
-specification has been misread consistently, because the same misreading writes the code and the
-test that confirms it. `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §0 names a fresh-context
-model or Codex for exactly this. The highest-value targets, in order: the acknowledgment boundary in
+**Item 8 was the one gap, and it is now closed.** A previous version of this file argued that no
+further work by the author could close it: self-review cannot find the class of error where a
+specification is misread consistently, because the same misreading writes the code and the test that
+confirms it. `docs/00_SHARED_AGENTIC_ENGINEERING_WORKFLOW.md` §0 names a fresh-context model for
+exactly this, and the highest-value targets were listed as the acknowledgment boundary in
 `writer.cpp` against PRD §3, the classification boundary in `reader.cpp` against PRD §4's result
 classes, and the crash supervisor's assumption that a parked child plus `SIGKILL` models a process
 crash faithfully (ADR-007).
+
+That review was carried out on 2026-11-12 by a fresh-context session that had no part in writing
+this code, against those three targets plus the stale-plan guard. It re-ran the verification rather
+than trusting it, and it confirmed the core: `durable_through_` advances in exactly one place, the
+recovery classifications match ADR-002 line for line, the supervisor's oracle is independent of the
+log and demonstrably able to fail, and the process-crash/power-loss boundary is drawn correctly
+throughout. It also found three real defects that self-review had missed — see *Independent audit
+remediation* below. The owner reviewed the findings and approved the remediation, which is the human
+approval ADR-005 substitutes for the clause's "human merges".
 
 Item 8's second clause, "human merges", predates the move to main-first (ADR-005), which replaced
 merging with human approval of consequential changes. The clause has not been reinterpreted here; it

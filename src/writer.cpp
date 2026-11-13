@@ -61,17 +61,20 @@ Result<EventLogWriter> EventLogWriter::Open(const std::filesystem::path& path,
   Status lock = AcquireExclusiveLock(file.fd.get(), path);
   if (!lock.ok()) return lock.error();
 
-  if (file.created) {
-    // A brand-new file's directory entry must be durable before any record in it can be
-    // acknowledged, or the first acknowledgment could outlive the file name (ADR-001).
+  Result<std::uint64_t> size = ops->FileSize(file.fd.get());
+  if (!size.ok()) return size.error();
+
+  if (file.created || size.value() == 0) {
+    // A log that holds no records yet must have a durable directory entry before any
+    // record in it can be acknowledged, or the first acknowledgment could outlive the
+    // file name (ADR-001). Both cases need it: a file this call created, and one that
+    // already existed empty. `touch log && eventlog append` produces the second, and
+    // nothing else in its lifetime would ever sync that directory entry.
     const std::filesystem::path parent =
         path.parent_path().empty() ? std::filesystem::path(".") : path.parent_path();
     Status directory = ops->SyncDirectory(parent);
     if (!directory.ok()) return directory.error();
   }
-
-  Result<std::uint64_t> size = ops->FileSize(file.fd.get());
-  if (!size.ok()) return size.error();
 
   std::uint64_t last_sequence = 0;
   if (size.value() > 0) {

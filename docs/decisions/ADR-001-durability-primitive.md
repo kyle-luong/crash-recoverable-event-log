@@ -27,8 +27,10 @@ The acknowledgment rule itself is unchanged and platform-independent: no record 
 until this call returns success. A failure makes the writer's durability state **uncertain**, not
 failed-and-retryable — see ADR-003.
 
-Separately, creating a new log file syncs the containing directory once, before the first record can
-be acknowledged, so the file's directory entry is durable too.
+Separately, a log that holds no records yet syncs the containing directory once, before the first
+record can be acknowledged, so the file's directory entry is durable too. Two cases need it: a file
+this `Open` created, and a file that already existed empty — in the second, nothing else in that
+file's lifetime would ever sync the entry.
 
 ## Consequences
 
@@ -40,6 +42,10 @@ be acknowledged, so the file's directory entry is durable too.
 - CI runs on Linux, so the PRD's named primitive is the one exercised by automated verification.
 - Still out of scope, per PRD §1: hardware that lies about flushing, filesystem bugs, and real
   power loss. `SIGKILL` does not clear the kernel page cache and is not a power-failure test.
+- **Amended 2026-11-12.** The directory sync had been conditioned on this `Open` having created the
+  file, which skipped a log that already existed empty — `touch log && eventlog append`. The rule
+  stated above is what the code now does. The guarantee it supports is unchanged; only its trigger
+  was too narrow, and it could only have mattered under power loss, which is out of scope anyway.
 
 ## Alternatives rejected
 

@@ -241,7 +241,7 @@ run append --file "$WORKDIR/each.log2" --records 100 --payload-bytes 64
 expect_output_contains "sync_each costs one barrier call per record" "Barrier calls: 100"
 
 expect_code "sync_batch rejects batch-size 1" 10 append --file "$WORKDIR/b1.log" --records 4 --payload-bytes 8 --policy sync_batch --batch-size 1
-expect_code "sync_batch rejects an oversized batch-size" 10 append --file "$WORKDIR/b2.log" --records 4 --payload-bytes 8 --policy sync_batch --batch-size 99999
+expect_code "an oversized batch-size is a usage error" 64 append --file "$WORKDIR/b2.log" --records 4 --payload-bytes 8 --policy sync_batch --batch-size 99999
 expect_code "an over-large batch buffer is a usage error" 64 append --file "$WORKDIR/b3.log" --records 4 --payload-bytes 1048576 --policy sync_batch --batch-size 4000
 expect_code "sync_batch resumes an existing log" 0 append --file "$WORKDIR/batch.log" --records 20 --payload-bytes 64 --policy sync_batch --batch-size 8 --append-existing
 run verify --file "$WORKDIR/batch.log"

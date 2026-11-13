@@ -225,7 +225,7 @@ int CommandAppend(int argc, char** argv) {
     options.policy = policy.value();
   }
   if (args.has_value("batch-size")) {
-    Result<std::uint64_t> batch = args.required_u64("batch-size", 1u << 20);
+    Result<std::uint64_t> batch = args.required_u64("batch-size", kMaxBatchRecords);
     if (!batch.ok()) return FailUsage(batch.error());
     options.batch_size = static_cast<std::size_t>(batch.value());
   }

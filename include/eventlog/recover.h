@@ -12,6 +12,8 @@ namespace eventlog {
 
 struct RecoveryPlan {
   ScanReport scan;
+  // The file the scan above was taken from, checked again before anything is truncated.
+  FileIdentity identity;
   // True only for LogStatus::kIncompleteTail. Hard corruption is never truncated.
   bool truncation_required = false;
   std::uint64_t truncate_to = 0;

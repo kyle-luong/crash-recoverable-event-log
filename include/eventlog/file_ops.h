@@ -34,11 +34,6 @@ class FileDescriptor {
 
   int get() const { return fd_; }
   bool valid() const { return fd_ >= 0; }
-  [[nodiscard]] int release() {
-    const int fd = fd_;
-    fd_ = -1;
-    return fd;
-  }
 
   // Closes and discards any error. Used by the destructor, where nothing can be reported.
   void reset();
@@ -122,6 +117,21 @@ Result<OpenedFile> OpenLogForAppend(const std::filesystem::path& path);
 Result<FileDescriptor> OpenLogForRead(const std::filesystem::path& path);
 // For recovery. Opens O_WRONLY|O_NOFOLLOW so a symlink cannot redirect a truncation.
 Result<FileDescriptor> OpenLogForUpdate(const std::filesystem::path& path);
+
+// Which file a descriptor is open on. A destructive operation planned by one read-only
+// pass and applied afterwards compares this, so a stale plan cannot be applied to a
+// different file that happens to be the same length. It identifies a file; it is not a
+// concurrency guarantee, and this project still supports one writer at a time only.
+struct FileIdentity {
+  std::uint64_t device = 0;
+  std::uint64_t inode = 0;
+
+  bool operator==(const FileIdentity& other) const {
+    return device == other.device && inode == other.inode;
+  }
+};
+
+Result<FileIdentity> IdentifyFile(int fd);
 
 // flock(LOCK_EX|LOCK_NB). Excludes cooperating writers only; a process that ignores
 // flock is not prevented from writing, and this project does not claim otherwise.

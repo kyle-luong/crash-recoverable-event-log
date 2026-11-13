@@ -236,6 +236,16 @@ Result<FileDescriptor> OpenLogForUpdate(const std::filesystem::path& path) {
   return fd;
 }
 
+Result<FileIdentity> IdentifyFile(int fd) {
+  using StatBuf = struct ::stat;
+  StatBuf info{};
+  if (::fstat(fd, &info) != 0) return IoError("fstat", errno, "");
+  FileIdentity identity;
+  identity.device = static_cast<std::uint64_t>(info.st_dev);
+  identity.inode = static_cast<std::uint64_t>(info.st_ino);
+  return identity;
+}
+
 Status AcquireExclusiveLock(int fd, const std::filesystem::path& path) {
   if (::flock(fd, LOCK_EX | LOCK_NB) == 0) return Status::Ok();
   const int lock_errno = errno;

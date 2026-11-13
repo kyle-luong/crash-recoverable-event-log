@@ -29,10 +29,10 @@ must not be described as satisfied.
 | CPP-AC02 | `test_codec` rejections: bad magic, version 0/2, any unknown flag bit, length 1 MiB+1, truncated header, CRC mismatch | M1 |
 | CPP-AC03 | `test_writer` short-write and `EINTR` injection via `FileOps` double; `EIO` propagation | M1 |
 | CPP-AC04 | `test_writer` second-writer `flock` contention | M1 |
-| CPP-AC05 | `test_writer` no ack when the write fails and when the sync fails | M1 |
+| CPP-AC05 | `test_writer` no ack when the write fails and when the sync fails; directory-entry sync asserted for a created log and for one that already existed empty, plus its injected failure (R4) | M1 |
 | CPP-AC06 | `test_batch` whole-batch acknowledgment, short final batch, failed batch write and failed batch sync acknowledging nothing; `cli_tests.sh` batch counts | M2 |
 | CPP-AC07 | `test_writer` failed-sync terminal state (ADR-003); `test_batch` reconfirms it at batch granularity | M1, M2 |
-| CPP-AC08 | `test_recovery` tail cut at **every** byte offset of a record; truncation only with explicit opt-in | M1 |
+| CPP-AC08 | `test_recovery` tail cut at **every** byte offset of a record; truncation only with explicit opt-in; stale plan rejected by length and by file identity | M1 |
 | CPP-AC09 | `test_recovery` byte flip in final record, byte flip in middle record, sequence gap and duplicate | M1 |
 | CPP-AC10 | `test_crash` oracle negative controls (lost acknowledgment, flipped byte in a complete record, sequence gap, fabricated payload, tail from a clean exit); `cli_tests.sh` kill matrix at all six checkpoints, plus a stand-in child whose false acknowledgment must be reported | M3 |
 | CPP-AC11 | `test_crash` accepts records recovered but never acknowledged; `cli_tests.sh` requires a nonzero extra count at `after_write_before_sync` and `after_sync_before_ack`, and zero at `before_write` and `after_ack` | M3 |

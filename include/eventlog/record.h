@@ -34,7 +34,6 @@ inline constexpr std::uint16_t kFormatVersion = 1;
 inline constexpr std::uint16_t kKnownFlagsMask = 0;
 inline constexpr std::size_t kHeaderSize = 24;
 inline constexpr std::uint32_t kMaxPayloadBytes = 1u << 20;  // 1 MiB
-inline constexpr std::size_t kMaxRecordSize = kHeaderSize + kMaxPayloadBytes;
 inline constexpr std::uint64_t kFirstSequence = 1;
 
 inline constexpr std::size_t kMagicOffset = 0;
@@ -68,10 +67,6 @@ struct Record {
 // CRC32C over header bytes [0, kCrcOffset) followed by the payload.
 std::uint32_t ComputeRecordCrc(std::uint64_t sequence, std::uint16_t flags,
                                std::span<const std::byte> payload);
-
-// Serializes the 24-byte header for this record. Payload size must already be in bounds.
-void EncodeHeader(std::uint64_t sequence, std::uint16_t flags, std::span<const std::byte> payload,
-                  HeaderBytes& out);
 
 // Replaces `out` with one complete record. Fails with kLimitExceeded on an oversized
 // payload and kInvalidArgument on sequence 0.

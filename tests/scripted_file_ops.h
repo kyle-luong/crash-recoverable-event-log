@@ -25,7 +25,8 @@ class ScriptedFileOps final : public FileOps {
  public:
   // Caps every write to this many bytes, forcing the short-write loop to run.
   std::size_t max_write_bytes = 0;  // 0 = no cap
-  // Returns EINTR this many times before each write is allowed through.
+  // Returns EINTR this many times in total, across this double's whole lifetime, before
+  // writes are allowed through. Not per write: the counter below is never reset.
   int eintr_rounds = 0;
   // After this many successful writes, fail with write_errno. -1 disables.
   int fail_write_after = -1;
@@ -39,6 +40,11 @@ class ScriptedFileOps final : public FileOps {
   int read_errno = EIO;
   // Caps every read to this many bytes, forcing the read loop to run. 0 = no cap.
   std::size_t max_read_bytes = 0;
+  // After this many successful directory syncs, fail with sync_directory_errno. -1
+  // disables. A new log's directory entry must be durable before any record in it can be
+  // acknowledged (ADR-001), so that failure has to be reachable in a test.
+  int fail_sync_directory_after = -1;
+  int sync_directory_errno = EIO;
 
   int write_calls = 0;
   int eintr_returned = 0;
@@ -47,6 +53,8 @@ class ScriptedFileOps final : public FileOps {
   int successful_syncs = 0;
   int read_calls = 0;
   int successful_reads = 0;
+  int sync_directory_calls = 0;
+  int successful_sync_directories = 0;
 
   Result<std::size_t> Write(int fd, std::span<const std::byte> data) override {
     ++write_calls;
@@ -89,7 +97,14 @@ class ScriptedFileOps final : public FileOps {
   }
 
   Status SyncDirectory(const std::filesystem::path& directory) override {
-    return real_.SyncDirectory(directory);
+    ++sync_directory_calls;
+    if (fail_sync_directory_after >= 0 &&
+        successful_sync_directories >= fail_sync_directory_after) {
+      return IoError("fsync", sync_directory_errno, "injected");
+    }
+    Status status = real_.SyncDirectory(directory);
+    if (status.ok()) ++successful_sync_directories;
+    return status;
   }
   Status Truncate(int fd, std::uint64_t length) override { return real_.Truncate(fd, length); }
   Result<std::uint64_t> FileSize(int fd) override { return real_.FileSize(fd); }

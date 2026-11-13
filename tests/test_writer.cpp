@@ -322,7 +322,7 @@ TEST(ResumeFailsOpenWhenTheSyncFails) {
 
 // A newly created log has no prefix to establish, so Open syncs the directory entry and
 // nothing else. Guards against charging every fresh writer a pointless data sync.
-TEST(FreshLogDoesNotSyncDataAtOpen) {
+TEST(FreshLogSyncsItsDirectoryEntryAndNoDataAtOpen) {
   const test::TempDir dir("writer-fresh-no-sync");
   const auto path = dir.file("events.log");
 
@@ -332,8 +332,50 @@ TEST(FreshLogDoesNotSyncDataAtOpen) {
 
   EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
   EL_CHECK_EQ(ops->sync_calls, 0);
+  // ADR-001 and docs/SPEC_VALIDATION.md R4: the file's name must be durable before any
+  // record in it can be acknowledged, so this is one barrier call Open owes every new log.
+  EL_CHECK_EQ(ops->sync_directory_calls, 1);
   EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{0});
   EL_EXPECT_STATUS_OK(writer.Close());
+}
+
+// The same obligation, for a file this call did not create. An empty log holds no records,
+// so its directory entry is still unflushed by anyone -- `touch events.log` then append is
+// ordinary use, and skipping the sync here would acknowledge a record whose file name is
+// not yet durable.
+TEST(ExistingEmptyLogStillSyncsItsDirectoryEntry) {
+  const test::TempDir dir("writer-existing-empty");
+  const auto path = dir.file("events.log");
+  test::WriteFileBytes(path, {});  // exists, zero bytes: what `touch` leaves behind
+
+  auto ops = std::make_shared<ScriptedFileOps>();
+  WriterOptions options;
+  options.file_ops = ops;
+
+  // No --append-existing needed: there is nothing to append to yet.
+  EventLogWriter writer = EL_EXPECT_OK(EventLogWriter::Open(path, options));
+  EL_CHECK_EQ(ops->sync_directory_calls, 1);
+  EL_CHECK_EQ(ops->sync_calls, 0);
+  EL_CHECK_EQ(EL_EXPECT_OK(writer.AppendAndSync(Payload(16))).sequence, std::uint64_t{1});
+  EL_CHECK_EQ(writer.durable_through_sequence(), std::uint64_t{1});
+  EL_EXPECT_STATUS_OK(writer.Close());
+}
+
+// If that directory sync fails, Open must fail: a writer that cannot make the file's name
+// durable cannot honestly acknowledge the first record written into it.
+TEST(OpenFailsWhenTheDirectorySyncFails) {
+  const test::TempDir dir("writer-dirsync-fails");
+  const auto path = dir.file("events.log");
+
+  auto ops = std::make_shared<ScriptedFileOps>();
+  ops->fail_sync_directory_after = 0;
+  WriterOptions options;
+  options.file_ops = ops;
+
+  EL_EXPECT_ERROR(EventLogWriter::Open(path, options), ErrorKind::kIo);
+  EL_CHECK_EQ(ops->sync_directory_calls, 1);
+  EL_CHECK_EQ(ops->write_calls, 0);
+  EL_CHECK_EQ(ops->sync_calls, 0);
 }
 
 TEST(RefusesToAppendToADamagedLog) {

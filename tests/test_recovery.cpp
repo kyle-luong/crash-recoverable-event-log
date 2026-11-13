@@ -362,6 +362,44 @@ TEST(StalePlanIsRejected) {
   EL_CHECK_EQ(test::FileSizeOf(path), bytes.size());
 }
 
+// The length guard above cannot catch a path that was replaced by a DIFFERENT file of
+// the same length, and applying the old truncation target to it would discard complete
+// valid records -- the one thing recovery must never do (ADR-002). The replacement is
+// built while the original still exists, so the two necessarily have different inodes,
+// and it is renamed into place so the identity that lands is the replacement's own.
+//
+// This is a stale-plan guard. It is not a claim that concurrent modification is safe:
+// docs/PRD.md section 2 supports one writer at a time and nothing else.
+TEST(PlanIsRejectedWhenTheFileWasReplacedAtTheSameSize) {
+  const test::TempDir dir("recovery-replaced");
+  const auto path = dir.file("events.log");
+  const auto replacement = dir.file("events.log.new");
+
+  BuildLogWithWriter(path, 3, 32);  // 3 x 56 bytes
+  test::TruncateFileTo(path, 168 - 11);
+
+  const RecoveryPlan plan = EL_EXPECT_OK(PlanRecovery(path));
+  EL_CHECK(plan.truncation_required);
+  EL_CHECK_EQ(plan.truncate_to, std::uint64_t{112});
+
+  // A clean two-record log of exactly 157 bytes: (24+54) + (24+55).
+  BuildRawLog(replacement, {{1, 54}, {2, 55}});
+  EL_CHECK_EQ(test::FileSizeOf(replacement), plan.scan.file_size);
+  std::error_code ec;
+  std::filesystem::rename(replacement, path, ec);
+  if (ec) return;  // cannot rename on this filesystem; nothing to assert
+
+  // Same length, so the length check cannot be what rejects this.
+  EL_CHECK_EQ(test::FileSizeOf(path), plan.scan.file_size);
+  EL_EXPECT_ERROR(ApplyRecovery(path, plan, *DefaultFileOps()), ErrorKind::kInvalidArgument);
+
+  // The replacement is intact: its second record ends at 157 and was never cut to 112.
+  EL_CHECK_EQ(test::FileSizeOf(path), std::uint64_t{157});
+  const ScanReport after = EL_EXPECT_OK(ScanLog(path));
+  EL_CHECK_EQ(after.status, LogStatus::kClean);
+  EL_CHECK_EQ(after.valid_records, std::uint64_t{2});
+}
+
 TEST(RecoveredLogCanBeAppendedToAgain) {
   const test::TempDir dir("recovery-then-append");
   const auto path = dir.file("events.log");

@@ -63,15 +63,23 @@ serialized little-endian, so the same `(sequence, payload_bytes)` pair yields id
 any platform. Specified in `README.md` and implemented in `src/payload.cpp`. This is an addition
 of detail, not a change to a requirement.
 
-### R4 — Durability of a newly created log file's directory entry
+### R4 — Durability of a log file's directory entry when it holds no records yet
 
 The PRD never mentions syncing the parent directory. Syncing only the file descriptor leaves the
 new file's *name* in a possibly unflushed directory block, so a first record could be acknowledged
 durable while the file itself is not guaranteed to be reachable after a crash.
 
-Resolution: on creating a new log file, the containing directory is opened and synced once before
-any record can be acknowledged. Required to make the existing CPP-AC05 acknowledgment claim true
-rather than to extend it.
+Resolution: when a log holds no records yet — created by this `Open`, or already present but
+empty — the containing directory is opened and synced once before any record can be acknowledged.
+Required to make the existing CPP-AC05 acknowledgment claim true rather than to extend it.
+
+**Narrowed in implementation until 2026-11-12.** The condition shipped as "this call created the
+file", which skipped a file that already existed empty, so `touch log && eventlog append`
+acknowledged records whose directory entry had never been synced by anyone. The independent audit
+found it; it is fixed and now pinned by `ExistingEmptyLogStillSyncsItsDirectoryEntry` and
+`OpenFailsWhenTheDirectorySyncFails`. Only power loss could have exposed it, and that is outside
+what this project claims (ADR-001), so no stated guarantee was ever wrong — the code was narrower
+than the resolution above.
 
 ## 3. Deferred, with reason
 

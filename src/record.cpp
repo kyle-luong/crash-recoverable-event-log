@@ -22,6 +22,16 @@ void FillHeaderPrefix(std::uint64_t sequence, std::uint16_t flags, std::uint32_t
   StoreLe32(out.data() + kPayloadLengthOffset, payload_length);
 }
 
+// Serializes the whole 24-byte header. The checksum is taken from the bytes just written
+// rather than from a second copy of them, so the layout is laid down once per record.
+void EncodeHeader(std::uint64_t sequence, std::uint16_t flags, std::span<const std::byte> payload,
+                  HeaderBytes& out) {
+  FillHeaderPrefix(sequence, flags, static_cast<std::uint32_t>(payload.size()), out);
+  const std::uint32_t header_crc =
+      Crc32cUpdate(0, std::span<const std::byte>(out.data(), kCrcOffset));
+  StoreLe32(out.data() + kCrcOffset, Crc32cUpdate(header_crc, payload));
+}
+
 }  // namespace
 
 std::uint32_t ComputeRecordCrc(std::uint64_t sequence, std::uint16_t flags,
@@ -31,12 +41,6 @@ std::uint32_t ComputeRecordCrc(std::uint64_t sequence, std::uint16_t flags,
   const std::uint32_t header_crc =
       Crc32cUpdate(0, std::span<const std::byte>(header.data(), kCrcOffset));
   return Crc32cUpdate(header_crc, payload);
-}
-
-void EncodeHeader(std::uint64_t sequence, std::uint16_t flags, std::span<const std::byte> payload,
-                  HeaderBytes& out) {
-  FillHeaderPrefix(sequence, flags, static_cast<std::uint32_t>(payload.size()), out);
-  StoreLe32(out.data() + kCrcOffset, ComputeRecordCrc(sequence, flags, payload));
 }
 
 Status AppendRecordTo(std::vector<std::byte>& out, std::uint64_t sequence,

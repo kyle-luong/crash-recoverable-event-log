@@ -7,12 +7,21 @@
 namespace eventlog {
 
 Result<RecoveryPlan> PlanRecovery(const std::filesystem::path& path) {
+  // Identified before the scan, never after: the recorded identity is then always at
+  // least as old as the scan, so a file swapped in later is rejected by ApplyRecovery
+  // instead of inheriting the scan of a file it is not.
+  Result<FileDescriptor> opened = OpenLogForRead(path);
+  if (!opened.ok()) return opened.error();
+  Result<FileIdentity> identity = IdentifyFile(opened.value().get());
+  if (!identity.ok()) return identity.error();
+
   // Read-only: this must be safe to run against a log nobody intends to change.
   Result<ScanReport> scan = ScanLog(path);
   if (!scan.ok()) return scan.error();
 
   RecoveryPlan plan;
   plan.scan = std::move(scan).value();
+  plan.identity = identity.value();
   if (plan.scan.status == LogStatus::kIncompleteTail) {
     plan.truncation_required = true;
     plan.truncate_to = plan.scan.valid_prefix_bytes;
@@ -49,7 +58,18 @@ Result<RecoveryOutcome> ApplyRecovery(const std::filesystem::path& path, const R
   if (!lock.ok()) return lock.error();
 
   // The plan was built from a separate read-only pass. If the file changed in between,
-  // the truncation target is stale and could discard valid records.
+  // the truncation target is stale and could discard valid records -- and valid records
+  // are exactly what recovery must never discard (ADR-002). Identity is checked as well
+  // as length, because a path can be replaced by a different file of the same size. This
+  // rejects a stale plan; it does not make concurrent modification safe, and nothing in
+  // docs/PRD.md section 2 supports a second process writing this log.
+  Result<FileIdentity> identity = IdentifyFile(fd.get());
+  if (!identity.ok()) return identity.error();
+  if (identity.value() != plan.identity) {
+    return Error(ErrorKind::kInvalidArgument,
+                 path.string() + " is no longer the file the preflight examined; re-run recovery");
+  }
+
   Result<std::uint64_t> size = ops.FileSize(fd.get());
   if (!size.ok()) return size.error();
   if (size.value() != plan.scan.file_size) {
